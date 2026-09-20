@@ -137,6 +137,17 @@ Latest turn:
 Return the updated memory as JSON:"""
 
 
+def expert_order_extra(order: str, pitfalls: list[str], tables: list[str], one_row_per: str) -> str:
+    """Block for the SQL prompt: the expert's data order (section + bullets, like context_extra)."""
+    lines = ["Expert's data order (follow it; it already resolves the domain pitfalls):", order.strip() or "(none)"]
+    if one_row_per:
+        lines.append(f"- one output row per: {one_row_per}")
+    if tables:
+        lines.append(f"- tables to use: {', '.join(tables)}")
+    lines += [f"- avoid: {p}" for p in pitfalls]
+    return "\n".join(lines) + "\n"
+
+
 def context_extra(memory: str, request_details: str) -> str:
     """Block for the SQL prompt: conversation memory + what the standardiser extracted."""
     parts = []

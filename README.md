@@ -14,18 +14,26 @@ The LLM is a lightweight **Qwen2.5-Coder** model served by **Ollama**. Nothing l
  0 Standardise request ─ LLM ─▶ standalone question + filters (plan = premium, city = Hanoi), metrics, sort, limit;
                                 references like "he" / "that city" resolved from the conversation memory
  1 Understand request ── LLM ─▶ intent = machine_learning, model = churn_random_forest
- 2 Select tables ───────────▶ lexical schema linking (scores shown)
+2 Expert data plan ── Expert ▶ (optional) the expert, briefed on the database, decides which tables / columns / filters
+                                answer the request and writes the order for the SQL writer
+ 2b Select tables ──────────▶ from the expert's plan (lexical schema linking as fallback, scores shown)
  3 Generate SQL ──────── LLM ─▶ SELECT * FROM customer_features WHERE plan='premium' AND city='Hanoi'
+                                (the "code agent": its prompt carries the expert's data order)
  4 Validate SQL ─────────────▶ sqlglot: single read-only SELECT, real tables/columns, LIMIT
  5 Execute SQL ──────────────▶ read-only MySQL session; on error the LLM repairs it (≤3 tries)
  6 Load model → Feature engineering → Inference → Explanations
- 7 Answer agent ── 2nd LLM ─▶ answer / key findings / interpretation / caveats, built only from computed facts
- 8 Chart planner ─ 2nd LLM ─▶ chart spec (bar, line, scatter, histogram, box) validated against the real columns
- 9 Context builder ─ 2nd LLM ─▶ updates the conversation memory (entities, filters, preferences, facts found)
+ 7 Expert assessment ─ Expert ▶ (optional) data-quality verdict, the expert's own answer, insights, advice
+ 8 Answer agent ── 2nd LLM ─▶ answer / key findings / interpretation / caveats, built from the computed facts
+                                AND the expert's assessment
+ 9 Chart planner ─ 2nd LLM ─▶ chart spec (bar, line, scatter, histogram, box) validated against the real columns
+ 10 Context builder ─ 2nd LLM ▶ updates the conversation memory (entities, filters, preferences, facts found)
 ```
 
-Two models do two jobs: a **coder** model writes SQL (`OLLAMA_MODEL`), a **general instruct** model explains the
-results and plans the charts (`OLLAMA_ANSWER_MODEL`, e.g. `qwen2.5:7b-instruct`). Plain data queries skip the
+Two kinds of model do the work: a **coder** model writes SQL (`OLLAMA_MODEL`), and a **thinking** model explains the
+results, plans the charts and acts as the Expert AI (`OLLAMA_ANSWER_MODEL` / `OLLAMA_EXPERT_MODEL`, default
+`qwen3:8b`). Thinking models reason before they answer - Ollama returns that reasoning separately and the trace
+shows it under *Model's thinking* - which helps with abstract or judgement questions; `qwen2.5:7b-instruct` still
+works as a faster non-thinking alternative. Plain data queries skip the
 prose and show the SQL and the result table directly.
 
 Results can be downloaded as **CSV** or **Excel** (statistics tables included as extra sheets), every chart
@@ -43,6 +51,7 @@ Requirements: Python 3.10+, [Ollama](https://ollama.com), and MySQL 8 (or MariaD
 ```bash
 # LLM
 ollama pull qwen2.5-coder:3b          # ~2 GB. Use :1.5b for weak laptops, :7b for better SQL
+ollama pull qwen3:8b                  # ~5 GB thinking model for answers + the Expert AI (qwen3:4b on weak laptops)
 
 # Python
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
@@ -175,6 +184,51 @@ Setup: create a Netlify personal access token (*User settings → Applications*)
 `NETLIFY_AUTH_TOKEN`. Without it the page still designs, builds and previews; only *Publish* is disabled.
 Caps: `DASHBOARD_MAX_WIDGETS` (8) and `DASHBOARD_ROWS_PER_WIDGET` (500). Records live in `dashboards/*.json`.
 
+### Expert AI: a briefed specialist in the middle of the pipeline (`agent/expert_agent.py`, `agent/briefing.py`, `agent/data_quality.py`, `pages/2_Expert_audit.py`)
+The answer agent explains *what* the numbers say. The **Expert AI** decides *which data is needed*, judges *whether
+it can be trusted* and says *what an expert would conclude*. It is built like the answer agent (own Ollama model, JSON
+output, trace steps, never fatal) and works in two places of every turn:
+
+1. **Expert data plan** (before any SQL) - briefed on the database, the expert reads the standardised request and
+   returns a plan: tables, columns, filters, grouping, one-row-per, sort/limit, an explicit **order for the SQL
+   writer** and the pitfalls to avoid. Table selection follows the plan (validated against the real schema; lexical
+   linking is the fallback) and the order is placed at the top of the SQL prompt.
+2. **Expert assessment** (after the data, before the answer) - the expert judges the rows against its own plan and the
+   tool-computed quality report, and writes its **own answer**, data issues, insights, advice and a confidence. The
+   answer agent receives this assessment inside its fact sheet and must build on it.
+
+**Briefings** - the expert learns the database from `briefings/<database>.md`: a hand-written briefing for the MySQL
+`employees` sample database and one for the `shop` demo are bundled (tables, grain, keys, joins and the rules of thumb
+an expert applies, e.g. `to_date = '9999-01-01'` = still current, the data snapshot ends in 2002). Any other database
+gets a deterministic briefing generated from its schema. The sidebar shows which briefing is loaded (*Database
+briefing*), you can edit the file, and *Reload briefing* picks up changes. With *Expert AI* switched off the pipeline
+is exactly the classic one.
+
+The assessment uses **specialised prompts per task**:
+
+| Task | When | Focus |
+|---|---|---|
+| Data-query review | plain SQL answers | completeness, suspicious values (negatives, outliers, future / sentinel dates), whether the rows answer the question or hide detail, which breakdown to add |
+| Statistics review | t-test, ANOVA, regression... | test fit, sample size per group, effect size vs significance, assumptions, what to run next |
+| ML review | predictions, clusters, anomalies | metrics vs trust, class balance, leakage risk, uncertain predictions, plausibility of explanations, how to validate |
+| Table audit | *Expert audit* page | a whole table or view: structure, per-column statistics, findings with severity, report with impact / fix / recommendations |
+| Data plan | every question (before SQL) | tables, columns, filters, one-row-per, order for the SQL writer, pitfalls from the briefing |
+
+Every number the expert may cite is computed by tools first (`agent/data_quality.py`): missing values, duplicates,
+constant columns, IQR outliers, negatives in amount-like columns, future dates, blank strings, case variants; for whole
+tables also distinct counts, ranges, orphan foreign keys, duplicate rows and open-ended sentinel dates, with one
+bounded query (`MAX_EXECUTION_TIME`) per group of columns. The model only judges, prioritises and advises - which is
+what makes a small local model usable here. The deterministic findings are always shown next to the report.
+
+* **In chat**: turn on *Expert AI* in the sidebar; an *Expert review* card (verdict, expert answer, quality score 1-5,
+  data issues, insights, advice, confidence) appears under each answer, and the trace shows the briefing and schema
+  the expert read, its plan, the order inside the SQL prompt, and the assessment the answer agent built on.
+* **Expert audit page**: pick a table, click *Audit table*, read the findings and the report, download it as Markdown.
+* **Persona**: the sidebar box *Domain & goals* (e.g. *"HR analytics; we care about pay equity and retention"*) is
+  injected into every expert prompt so the advice is business-specific. `EXPERT_PERSONA` sets the default.
+* **Model**: `OLLAMA_EXPERT_MODEL` (empty = the answer model). Use a **thinking** model - `qwen3:8b` by default,
+  `qwen3:14b` if you have the memory; its reasoning is recorded in the trace. Nothing is fine-tuned.
+
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),
 `anova`, `chi_square` (+ Cramér's V), `normality` (Shapiro-Wilk), `linear_regression` (OLS),
@@ -218,7 +272,8 @@ prediction changes. It works the same way for every supervised model.
 |---|---|
 | `DATABASE_URL` | `mysql+pymysql://agent_ro:agent_ro_pw@127.0.0.1:3306/shop` |
 | `OLLAMA_HOST` / `OLLAMA_MODEL` | `http://127.0.0.1:11434` / `qwen2.5-coder:3b` |
-| `OLLAMA_ANSWER_MODEL` / `MAX_CHARTS` | *(same as OLLAMA_MODEL)* / 2 — use an instruct model, e.g. `qwen2.5:7b-instruct` |
+| `OLLAMA_ANSWER_MODEL` / `MAX_CHARTS` | *(same as OLLAMA_MODEL)* / 2 — a thinking model such as `qwen3:8b` is recommended |
+| `OLLAMA_THINKING_MODELS`, `LLM_THINK_TIMEOUT_S` | `qwen3\|deepseek-r1\|gpt-oss\|magistral\|phi4-reasoning`, 900 — names matching the regex run with thinking on and the longer timeout |
 | `SCHEMA_PROBE_MS` | 4000 — time limit per row-count / sample probe at schema load (heavy views are skipped) |
 | `MAX_ROWS`, `MAX_SQL_RETRIES`, `MAX_TABLES_IN_PROMPT` | 1000, 3, 6 |
 | `LLM_NUM_CTX`, `LLM_TEMPERATURE` | 8192, 0 |
@@ -226,6 +281,8 @@ prediction changes. It works the same way for every supervised model.
 | `POWERBI_SOURCE`, `POWERBI_INLINE_MAX_ROWS` | `live`, 5000 |
 | `NETLIFY_AUTH_TOKEN` | *(empty = dashboard publishing off)* |
 | `DASHBOARD_MAX_WIDGETS`, `DASHBOARD_ROWS_PER_WIDGET`, `DASHBOARDS_DIR` | 8, 500, `./dashboards` |
+| `OLLAMA_EXPERT_MODEL`, `EXPERT_PERSONA`, `EXPERT_REVIEWS` | *(answer model)*, *(empty)*, 1 |
+| `EXPERT_AUDIT_TIMEOUT_MS`, `EXPERT_AUDIT_SAMPLE_ROWS` | 20000, 500 |
 
 ## 7. Tests
 ```bash
@@ -237,6 +294,8 @@ Tests cover the SQL guard, the read-only session, SQL self-repair, t-test and re
 ```
 app.py                  Streamlit UI (chat)     ui_shared.py  cached agent shared by the pages
 pages/1_Dashboards.py   Dashboards page: describe -> build -> preview -> publish
+pages/2_Expert_audit.py Expert audit page: profile a table -> findings -> expert report
+briefings/              database briefings for the expert (employees.md, shop.md; add <database>.md for yours)
 dashboard/  spec.py  prompts.py  builder.py (design + fetch + render)  render.py (HTML/CSS/JS bundle)
             netlify.py (zip deploy)  store.py (dashboards/*.json)  assets/chart.umd.js (vendored Chart.js)
 train_models.py         one-off training → models/*.joblib + manifest.json
@@ -246,9 +305,11 @@ agent/  config.py  db.py (schema, linking, SQL guard)  llm.py (Ollama JSON-schem
         request_agent.py (request standardiser)  context.py (conversation memory + context builder)
         stats_tools.py  trace.py (explainability)
         export.py (CSV/Excel/PNG)  powerbi.py (.pbip project)
+        expert_agent.py (Expert AI: data plan, assessment, table audit)  briefing.py (database briefings)
+        data_quality.py (quality toolkit + audit SQL)
 ml/     features.py (auto FE)  registry.py (bundles)  inference.py (predict + explain)
 sample_data/seed_mysql.py   demo database
-tests/  test_agent.py  test_export.py  test_powerbi.py  test_dashboard_*.py
+tests/  test_agent.py  test_export.py  test_powerbi.py  test_dashboard_*.py  test_data_quality.py  test_expert_*.py  test_briefing.py
 ```
 
 ## Tips for small models

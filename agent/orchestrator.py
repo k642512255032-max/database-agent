@@ -5,13 +5,16 @@ Pipeline (every box is a recorded, visible Step):
   0 Standardise request ----> standalone question + filters / metrics / grouping / sort / limit
                               (request_agent.py, reads the conversation memory)
   1 Understand request ----> intent: data_query | statistics | machine_learning (+ model)
-  2 Select relevant tables    (lexical schema linking, scores shown)
-  3 Generate SQL              (LLM, with its reasoning)
+  2 Expert data plan -------> (optional) the briefed expert decides which tables / columns / filters answer the
+                              request and writes the order for the SQL writer (expert_agent.py + briefings/)
+  2b Select relevant tables   (from the expert's plan; lexical schema linking as fallback, scores shown)
+  3 Generate SQL              (LLM "code agent", with the expert's order in its prompt)
   4 Validate SQL              (sqlglot: read-only, known tables/columns, LIMIT)
   5 Execute SQL               (on failure -> LLM repairs using the DB error, up to N retries)
   6a statistics:  choose method -> run test -> interpretation
   6b ML:          check columns -> feature engineering -> inference -> explanations
-  7 Write answer              (LLM summary grounded in computed facts)
+  7 Expert assessment ------> (optional) the expert judges the data and gives its own answer + insights + advice
+  8 Write answer              (answer agent: LLM summary grounded in computed facts AND the expert's assessment)
   8 Update conversation context (context.py: entities, filters, preferences, facts for the next turn)
 """
 from __future__ import annotations
@@ -31,7 +34,9 @@ from . import prompts, stats_tools
 from .answer_agent import AnswerAgent
 from .config import settings
 from .context import ContextBuilder, ConversationContext
+from .briefing import Briefing, load_briefing
 from .db import Database, UnsafeSQLError
+from .expert_agent import DataPlan, ExpertAgent
 from .llm import OllamaLLM
 from .request_agent import RequestStandardizer, StandardRequest, previous_turn_text
 from .trace import Step, Trace
@@ -55,6 +60,8 @@ class AgentResult:
     model_name: Optional[str] = None
     answer: str = ""
     charts: list[dict] = field(default_factory=list)   # chart specs planned by the answer agent
+    expert: Optional[dict] = None               # expert assessment (task, verdict, expert_answer, issues, insights, advice)
+    plan: Optional[DataPlan] = None             # the expert's data order for the SQL writer
     error: Optional[str] = None
     extras: dict = field(default_factory=dict)
 
@@ -73,7 +80,8 @@ class DataAgent:
     def __init__(self, db: Database | None = None, llm: Any | None = None,
                  registry: ModelRegistry | None = None, answer_agent: AnswerAgent | None = None,
                  charts: bool = True, summarise_data: bool | None = None,
-                 standardizer: RequestStandardizer | None = None, context_builder: ContextBuilder | None = None):
+                 standardizer: RequestStandardizer | None = None, context_builder: ContextBuilder | None = None,
+                 expert_agent: ExpertAgent | None = None, expert: bool = False):
         self.db = db or Database()
         self.llm = llm or OllamaLLM()
         self.registry = registry or ModelRegistry()
@@ -82,6 +90,10 @@ class DataAgent:
         # step 0: the standardiser shares the SQL model; step 8: the context builder shares the answer model
         self.standardizer = standardizer or RequestStandardizer(self.llm)
         self.context_builder = context_builder or ContextBuilder(self.answer_agent.llm)
+        # step 7b: the expert agent shares the answer model unless OLLAMA_EXPERT_MODEL names a stronger one
+        self.expert_agent = expert_agent or ExpertAgent(self.answer_agent.llm if not settings.expert_model else None)
+        self.expert = expert
+        self._briefing: Briefing | None = None      # loaded lazily: tests build agents without a real database
         self.charts = charts
         # plain-English summary for data queries; costs one answer-model call per query
         self.summarise_data = settings.summarise_data_queries if summarise_data is None else summarise_data
@@ -101,15 +113,19 @@ class DataAgent:
                               ConversationContext())
         self._conversation = ""
         self._conversation_tables_hint = ""
+        if self.expert and not self.expert_agent.briefing:
+            self.expert_agent.briefing = self.briefing.text
         try:
             self._standardise(res, ctx, history)
             self._route(res, force_intent, force_model)
+            self._plan(res)
             tables = self._link_tables(res)
             self._generate_and_run_sql(res, tables)
             if res.intent == "statistics":
                 self._statistics(res)
             elif res.intent == "machine_learning":
                 self._machine_learning(res)
+            self._expert(res)
             self._answer(res)
         except Exception as exc:
             res.error = f"{type(exc).__name__}: {exc}"
@@ -139,6 +155,22 @@ class DataAgent:
         self._conversation = prompts.context_extra(memory, req.details_text())
         if req.is_follow_up:
             self._conversation_tables_hint = " ".join(ctx.tables)
+
+    @property
+    def briefing(self) -> Briefing:
+        """Database briefing for the expert (briefings/<db>.md or auto-generated); empty when unavailable."""
+        if self._briefing is None:
+            try:
+                self._briefing = load_briefing(self.db)
+            except Exception as exc:
+                log.warning("database briefing unavailable: %s", exc)
+                self._briefing = Briefing("?", "auto", None, "")
+        return self._briefing
+
+    def reload_briefing(self) -> Briefing:
+        self._briefing = None
+        self.expert_agent.briefing = self.briefing.text
+        return self._briefing
 
     # ============================================================ 1. router
     def _route(self, res: AgentResult, force_intent: str | None, force_model: str | None) -> None:
@@ -199,17 +231,47 @@ class DataAgent:
                 best, best_score = name, score
         return best
 
-    # ====================================================== 2. schema linking
+    # ============================================== 2. expert data plan
+    def _plan(self, res: AgentResult) -> None:
+        """The briefed expert decides what data is needed; no-op when the expert is off."""
+        if not self.expert:
+            return
+        schema = self.db.schema()
+        if len(schema) <= settings.max_tables_in_prompt * 2:
+            candidates = list(schema)
+        else:
+            candidates, _ = self.db.link_tables(res.standalone_question + " " + self._conversation_tables_hint)
+            candidates = candidates + [t for t in self._model_tables(res) if t not in candidates]
+        schema_text = self.db.schema_text(candidates, with_samples=False)
+        ml_note = ""
+        if res.intent == "machine_learning" and res.model_name:
+            card = self.registry.get(res.model_name).card()
+            cols = ([card["id_column"]] if card.get("id_column") else []) + card["feature_columns"]
+            ml_note = (f"The rows feed the trained model '{card['name']}'; the result must contain exactly these "
+                       f"columns: {', '.join(cols)}. Base tables of the model: {', '.join(self._model_tables(res))}.")
+        res.plan = self.expert_agent.plan(res, res.trace, schema_text, schema, ml_note)
+
+    def _model_tables(self, res: AgentResult) -> list[str]:
+        if not res.model_name:
+            return []
+        card = self.registry.get(res.model_name).card()
+        return [t for t in self.db.schema() if re.search(rf"\b{re.escape(t)}\b", card["base_sql"], re.I)]
+
+    # ================================================= 2b. table linking
     def _link_tables(self, res: AgentResult) -> list[str]:
         with res.trace.step("Select relevant tables",
                             "Only relevant tables go into the prompt, which keeps a small model accurate.") as s:
-            tables, scores = self.db.link_tables(res.standalone_question + " " + self._conversation_tables_hint)
-            if res.model_name:
-                card = self.registry.get(res.model_name).card()
-                for t in self.db.schema():
-                    if re.search(rf"\b{re.escape(t)}\b", card["base_sql"], re.I) and t not in tables:
-                        tables.append(t)
-            s.add(selected_tables=tables, relevance_scores={k: v for k, v in scores.items() if v})
+            if res.plan is not None and res.plan.tables:
+                tables = list(res.plan.tables)
+                s.add(source="expert plan")
+            else:
+                tables, scores = self.db.link_tables(res.standalone_question + " " + self._conversation_tables_hint)
+                s.add(source="lexical linking" + (" (expert plan unavailable)" if self.expert else ""),
+                      relevance_scores={k: v for k, v in scores.items() if v})
+            for t in self._model_tables(res):
+                if t not in tables:
+                    tables.append(t)
+            s.add(selected_tables=tables)
             return tables
 
     # ================================================= 3-5. SQL gen / run
@@ -223,6 +285,9 @@ class DataAgent:
             extra = prompts.ml_sql_extra(card)
         elif res.intent == "statistics":
             extra = prompts.stats_sql_extra()
+        if res.plan is not None:      # the expert's order comes first: it is the spec the code agent implements
+            extra = prompts.expert_order_extra(res.plan.order_for_sql, res.plan.pitfalls, res.plan.tables,
+                                               res.plan.one_row_per) + "\n" + extra
         if self._conversation:
             extra = self._conversation + "\n" + extra
 
@@ -349,6 +414,13 @@ class DataAgent:
             res.answer = self.answer_agent.compose(res, res.trace)
         if self.charts:
             res.charts = self.answer_agent.plan_charts(res, res.trace, res.frame())
+
+
+    # ================================================== 7. expert assessment
+    def _expert(self, res: AgentResult) -> None:
+        """Runs before the answer agent: its output is part of the fact sheet the answer is written from."""
+        if self.expert and res.data is not None:
+            res.expert = self.expert_agent.assess(res, res.trace)
 
 
 # ---------------------------------------------------------------- helpers

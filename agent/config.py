@@ -52,6 +52,10 @@ class Settings:
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0"))
     num_ctx: int = int(os.getenv("LLM_NUM_CTX", "8192"))
     llm_timeout_s: int = int(os.getenv("LLM_TIMEOUT_S", "180"))
+    # Thinking (reasoning) models: Ollama runs their reasoning first ("think": true), so they need more time.
+    # Model names matching this regex get thinking switched on and the longer timeout.
+    thinking_models: str = os.getenv("OLLAMA_THINKING_MODELS", r"qwen3|deepseek-r1|gpt-oss|magistral|phi4-reasoning")
+    llm_think_timeout_s: int = int(os.getenv("LLM_THINK_TIMEOUT_S", "900"))
     # Separate model for the answer agent (explanations + chart planning). Empty = same as OLLAMA_MODEL.
     # A general instruct model (e.g. qwen2.5:7b-instruct) writes far better prose than a coder model.
     answer_model: str = os.getenv("OLLAMA_ANSWER_MODEL", "")
@@ -79,6 +83,15 @@ class Settings:
     dashboard_max_widgets: int = int(os.getenv("DASHBOARD_MAX_WIDGETS", "8"))
     dashboard_rows_per_widget: int = int(os.getenv("DASHBOARD_ROWS_PER_WIDGET", "500"))   # LIMIT for widget SQL and table rows
     dashboards_dir: Path = Path(os.getenv("DASHBOARDS_DIR", str(ROOT / "dashboards")))
+
+    # --- Expert AI ---------------------------------------------------------
+    # A specialist agent beside the answer agent: judges data quality, gives insights and advice.
+    # Empty model = same as OLLAMA_ANSWER_MODEL (then OLLAMA_MODEL). A 14B instruct model gives noticeably better advice.
+    expert_model: str = os.getenv("OLLAMA_EXPERT_MODEL", "")
+    expert_persona: str = os.getenv("EXPERT_PERSONA", "")          # "Domain & goals" text, editable in the sidebar
+    expert_reviews: bool = os.getenv("EXPERT_REVIEWS", "1") not in ("0", "false", "no", "")   # review every chat answer
+    expert_audit_timeout_ms: int = int(os.getenv("EXPERT_AUDIT_TIMEOUT_MS", "20000"))   # per audit query (MySQL hint)
+    expert_audit_sample_rows: int = int(os.getenv("EXPERT_AUDIT_SAMPLE_ROWS", "500"))    # rows fetched for sample checks
 
 
 settings = Settings()

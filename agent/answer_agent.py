@@ -41,7 +41,10 @@ Rules: use ONLY numbers in the fact sheet; never invent or extrapolate. Round se
 separators). Do not mention SQL, column types or the tools. Do not repeat the question. Plain English; explain any
 statistic in a few words (e.g. "p = 0.28, i.e. a difference this small could easily be chance").
 If a statistic is nan / missing or there are too few rows (e.g. a test on 2 rows), the answer must say the analysis
-could not be computed and why - never conclude anything from a nan."""
+could not be computed and why - never conclude anything from a nan.
+If the fact sheet contains an EXPERT ASSESSMENT, build on it: state the expert answer's key numbers, carry its data
+issues into the caveats, use its insights in the interpretation, and never contradict its verdict. If the verdict says
+the data cannot answer the question, say so instead of answering."""
 
 DATA_SUMMARY_SYSTEM = """You summarise the result of a database query for a business user, in plain English.
 You get the question and a FACT SHEET (row count, columns, numeric summary, top values, sample rows). Return JSON with:
@@ -50,7 +53,8 @@ You get the question and a FACT SHEET (row count, columns, numeric summary, top 
 - key_findings: 0-3 short bullet strings with one concrete number each; leave empty if the answer already says it all.
 Rules: use ONLY numbers in the fact sheet; never invent, extrapolate or explain causes. Round sensibly (2 decimals,
 thousands separators). Do not mention SQL, column types or tools. Do not repeat the question. If the sample rows are
-only part of the result, describe the whole table (from the row count and summary), not just the sample."""
+only part of the result, describe the whole table (from the row count and summary), not just the sample.
+If there is an EXPERT ASSESSMENT, reflect the expert answer and mention its data issues in one clause."""
 
 DATA_SUMMARY_SCHEMA = {
     "type": "object",
@@ -142,6 +146,7 @@ class AnswerAgent:
             s.add(model=getattr(self.llm, "model", "?"), facts_given_to_model=facts)
             try:
                 out = self.llm.chat_json(system, f"Question: {res.standalone_question}\n\nFACT SHEET:\n{facts}", schema)
+                s.add_thinking(self.llm)
                 out = {k: out.get(k) for k in schema["properties"]}     # brief mode renders only its own fields
                 if not (out.get("answer") or "").strip():
                     raise ValueError("empty answer")
@@ -192,6 +197,8 @@ def fact_sheet(res: "AgentResult", max_rows: int = 10) -> str:
     """Everything the answer agent may talk about - computed by tools, not by an LLM."""
     df = res.data
     parts = [f"Analysis type: {res.intent.replace('_', ' ')}."]
+    if res.expert:
+        parts.append(expert_assessment_text(res.expert))
     if df is not None:
         parts.append(f"Rows returned: {len(df)}. Columns: {', '.join(map(str, df.columns))}.")
         prof = profile(df)
@@ -222,6 +229,19 @@ def fact_sheet(res: "AgentResult", max_rows: int = 10) -> str:
     if df is not None and res.ml is None:
         parts.append(f"First rows:\n{_table_text(df, max_rows)}")
     return "\n\n".join(parts)
+
+
+def expert_assessment_text(exp: dict) -> str:
+    """The expert's assessment as a fact-sheet section (the answer agent must build on it)."""
+    def bullets(items):
+        return "\n".join(f"- {i}" for i in items) if items else "- none"
+    return ("EXPERT ASSESSMENT (a briefed domain expert reviewed this data before you):\n"
+            f"Verdict: {exp.get('verdict', '')}\n"
+            f"Expert answer: {exp.get('expert_answer') or '(none)'}\n"
+            f"Data issues:\n{bullets(exp.get('data_issues'))}\n"
+            f"Insights:\n{bullets(exp.get('insights'))}\n"
+            f"Advice:\n{bullets(exp.get('advice'))}\n"
+            f"Confidence: {exp.get('confidence', 'medium')}")
 
 
 def _table_text(t, max_rows: int = 12) -> str:

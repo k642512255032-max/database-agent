@@ -2,6 +2,10 @@
 
 Small models such as qwen2.5-coder:1.5b/3b are far more reliable when Ollama
 constrains the output with a JSON schema, so every agent call uses `chat_json`.
+
+Thinking models (qwen3, deepseek-r1, gpt-oss, ...) reason before they answer: for them the
+request carries "think": true, Ollama returns the reasoning separately in message.thinking
+(kept in `last_thinking` so the trace can show it) and the content stays clean JSON.
 """
 from __future__ import annotations
 
@@ -18,10 +22,16 @@ class LLMError(RuntimeError):
     pass
 
 
+def is_thinking_model(name: str) -> bool:
+    return bool(re.search(settings.thinking_models, name or "", re.I))
+
+
 class OllamaLLM:
-    def __init__(self, model: str | None = None, host: str | None = None):
+    def __init__(self, model: str | None = None, host: str | None = None, think: bool | None = None):
         self.model = model or settings.model
         self.host = (host or settings.ollama_host).rstrip("/")
+        self.think = is_thinking_model(self.model) if think is None else think
+        self.last_thinking: str = ""          # reasoning of the last call (thinking models only)
 
     # ------------------------------------------------------------------ utils
     def health(self) -> tuple[bool, str]:
@@ -48,21 +58,29 @@ class OllamaLLM:
         }
         if schema is not None:
             payload["format"] = schema  # Ollama >= 0.5 structured outputs
+        if self.think:
+            payload["think"] = True     # Ollama >= 0.9: reasoning comes back in message.thinking
+        timeout = settings.llm_think_timeout_s if self.think else settings.llm_timeout_s
         try:
-            r = requests.post(f"{self.host}/api/chat", json=payload, timeout=settings.llm_timeout_s)
+            r = requests.post(f"{self.host}/api/chat", json=payload, timeout=timeout)
             r.raise_for_status()
         except requests.RequestException as exc:
             raise LLMError(f"Ollama request failed: {exc}") from exc
-        return r.json()["message"]["content"]
+        message = r.json()["message"]
+        self.last_thinking = (message.get("thinking") or "").strip()
+        return message["content"]
 
     def chat_json(self, system: str, user: str, schema: dict) -> dict:
         raw = self.chat(system, user, schema=schema)
         return parse_json(raw)
 
 
+THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S)
+
+
 def parse_json(raw: str) -> dict:
-    """Parse JSON robustly (strips ``` fences / leading prose if a model adds them)."""
-    raw = raw.strip()
+    """Parse JSON robustly (strips <think> blocks, ``` fences and leading prose if a model adds them)."""
+    raw = THINK_BLOCK.sub("", raw).strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:

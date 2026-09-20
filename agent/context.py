@@ -108,6 +108,7 @@ class ContextBuilder:
                                          prompts.context_user(json.dumps(ctx.to_dict(), ensure_ascii=False), turn),
                                          prompts.CONTEXT_SCHEMA)
                 new = ConversationContext.from_dict(out)
+                s.add_thinking(self.llm)
                 s.reasoning = out.get("reasoning")
             except Exception as exc:
                 s.status = "warning"

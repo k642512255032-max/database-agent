@@ -284,6 +284,16 @@ class Database:
             # MySQL allows duplicate names (e.g. `SELECT e.*, f.*` on a join); pandas/pyarrow do not.
             return pd.DataFrame(result.fetchall(), columns=_unique_columns(list(result.keys())))
 
+    def run_bounded(self, sql: str, timeout_ms: int) -> pd.DataFrame:
+        """Run a SELECT built by our own code (never by the LLM) with a server-side time limit, like the
+        schema probes. Used by the Expert AI table audit."""
+        if not sql.lstrip().upper().startswith("SELECT"):
+            raise ValueError("run_bounded is for SELECT statements only")
+        if self.dialect != "mysql":
+            return self.run(sql)
+        head, rest = sql.lstrip().split(" ", 1)          # "SELECT", "<rest of the statement>"
+        return self.run(f"{head} /*+ MAX_EXECUTION_TIME({int(timeout_ms)}) */ {rest}")
+
 
 # ---------------------------------------------------------------- helpers
 def _unique_columns(names: list[str]) -> list[str]:
