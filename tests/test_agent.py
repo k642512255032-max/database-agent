@@ -21,16 +21,29 @@ from ml.registry import ModelRegistry  # noqa: E402
 class ScriptedLLM:
     """Returns pre-written responses so the pipeline can be tested deterministically."""
 
-    def __init__(self, route: dict, sqls: list[str], stats: dict | None = None, rewrite: dict | None = None):
-        self.route, self.sqls, self.stats, self.rewrite = route, list(sqls), stats, rewrite
+    def __init__(self, route: dict, sqls: list[str], stats: dict | None = None, standard: dict | None = None,
+                 context: dict | None = None):
+        self.route, self.sqls, self.stats = route, list(sqls), stats
+        self.standard, self.context = standard, context   # request standardiser / context builder replies
         self.calls: list[str] = []
         self.prompts: list[str] = []
 
     def chat_json(self, system: str, user: str, schema: dict) -> dict:
         self.prompts.append(user)
-        if system.startswith("You turn a follow-up"):
-            self.calls.append("rewrite")
-            return self.rewrite
+        if system.startswith("You standardise"):          # request standardiser; default = "as typed"
+            self.calls.append("standardise")
+            if self.standard is not None:
+                return self.standard
+            q = user.split("New message: ", 1)[1].split("\n", 1)[0]
+            return {"reasoning": "scripted", "is_follow_up": False, "standalone_question": q, "task": "other",
+                    "entities": [], "filters": [], "metrics": [], "grouping": [], "time_range": "", "sort": "",
+                    "limit": 0, "ambiguities": []}
+        if system.startswith("You maintain"):             # context builder; default = keep memory, add a fact
+            self.calls.append("context")
+            if self.context is not None:
+                return self.context
+            return {"reasoning": "scripted", "summary": "scripted memory", "entities": {}, "filters": [],
+                    "metrics": [], "preferences": [], "findings": ["scripted finding"]}
         if system.startswith("You classify"):
             self.calls.append("route")
             return self.route
@@ -217,28 +230,85 @@ def test_follow_up_question_uses_previous_answer(db):
     assert first.error is None and len(first.data) == 1
     cid = int(first.data.iloc[0]["customer_id"])
 
+    # the context builder ran after the first answer and remembered the customer
+    assert first.context is not None and first.context.turns == 1 and "customers" in first.context.tables
+    assert first.trace.steps[-1].name == "Update conversation context"
+
     llm = ScriptedLLM(
         {"reasoning": "lookup", "intent": "data_query", "model_name": ""},
         [f"SELECT full_name, age FROM customers WHERE customer_id = {cid}"],
-        rewrite={"reasoning": "he = the oldest customer", "is_follow_up": True,
-                 "standalone_question": f"How old is customer {cid}?"},
+        standard={"reasoning": "he = the oldest customer", "is_follow_up": True,
+                  "standalone_question": f"How old is customer {cid}?", "task": "lookup",
+                  "entities": [f"customer {cid}"], "filters": [f"customer_id = {cid}"], "metrics": ["age"],
+                  "grouping": [], "time_range": "", "sort": "", "limit": 0, "ambiguities": []},
     )
     second = agent(db, llm).ask("How old is he?", history=[first])
     assert second.error is None, second.trace.as_text()
     assert second.standalone_question == f"How old is customer {cid}?"
-    assert second.trace.steps[0].name == "Resolve follow-up question"
-    rewrite_prompt = llm.prompts[0]
-    assert str(cid) in rewrite_prompt and "Who is the oldest customer?" in rewrite_prompt
+    assert second.request.is_follow_up and second.request.metrics == ["age"]
+    assert second.trace.steps[0].name == "Standardise the request"
+    std_prompt = llm.prompts[0]      # standardiser sees the memory and the previous turn's rows
+    assert str(cid) in std_prompt and "Who is the oldest customer?" in std_prompt
+    assert "scripted memory" in std_prompt
     sql_prompt = next(p for p in llm.prompts if "Database schema" in p)
-    assert "Earlier in this conversation" in sql_prompt and f"How old is customer {cid}?" in sql_prompt
+    assert "Conversation memory" in sql_prompt and f"How old is customer {cid}?" in sql_prompt
+    assert "Request details" in sql_prompt and f"customer_id = {cid}" in sql_prompt
     assert len(second.data) == 1
+    assert second.context.turns == 2
 
 
-def test_independent_question_is_not_rewritten(db):
+def test_independent_question_is_kept_as_typed(db):
     first = agent(db, ScriptedLLM({"reasoning": "x", "intent": "data_query", "model_name": ""},
                                   ["SELECT COUNT(*) AS n FROM customers"])).ask("How many customers are there?")
     llm = ScriptedLLM({"reasoning": "x", "intent": "data_query", "model_name": ""},
                       ["SELECT city, COUNT(*) AS n FROM customers GROUP BY city"])
     r = agent(db, llm).ask("Count customers per city in the whole database please", history=[first])
-    assert r.error is None and "rewrite" not in llm.calls
-    assert r.standalone_question == r.question
+    assert r.error is None and llm.calls[0] == "standardise"
+    assert r.standalone_question == r.question and not r.request.is_follow_up
+    # the memory is still handed to the SQL model (it is cheap and may carry standing preferences)
+    sql_prompt = next(p for p in llm.prompts if "Database schema" in p)
+    assert "Conversation memory" in sql_prompt
+
+
+def test_standardiser_failure_falls_back_to_raw_question(db):
+    class Flaky(ScriptedLLM):
+        def chat_json(self, system, user, schema):
+            if system.startswith("You standardise"):
+                raise RuntimeError("ollama down")
+            return super().chat_json(system, user, schema)
+
+    llm = Flaky({"reasoning": "x", "intent": "data_query", "model_name": ""}, ["SELECT COUNT(*) AS n FROM customers"])
+    r = agent(db, llm).ask("How many customers are there?")
+    assert r.error is None and r.standalone_question == "How many customers are there?"
+    assert r.trace.steps[0].status == "warning"
+
+
+def test_context_builder_merges_and_survives_llm_failure(db):
+    from agent.context import ConversationContext
+
+    class NoContext(ScriptedLLM):
+        def chat_json(self, system, user, schema):
+            if system.startswith("You maintain"):
+                raise RuntimeError("ollama down")
+            return super().chat_json(system, user, schema)
+
+    old = ConversationContext(summary="looking at customers", preferences=["always top 10"], tables=["orders"], turns=3)
+    llm = NoContext({"reasoning": "x", "intent": "data_query", "model_name": ""}, ["SELECT COUNT(*) AS n FROM customers"])
+    r = agent(db, llm).ask("How many customers are there?", context=old)
+    ctx = r.context
+    assert r.error is None and r.trace.steps[-1].status == "warning"
+    assert ctx.turns == 4 and ctx.tables == ["orders", "customers"]        # deterministic bookkeeping
+    assert ctx.preferences == ["always top 10"] and ctx.summary == "looking at customers"   # memory kept
+    assert ctx.findings and ctx.findings[-1].endswith("-> 1 rows")
+    # with the LLM: its memory wins, the deterministic fields are still maintained
+    llm = ScriptedLLM({"reasoning": "x", "intent": "data_query", "model_name": ""}, ["SELECT COUNT(*) AS n FROM customers"],
+                      context={"reasoning": "r", "summary": "new summary", "entities": {"customer": "id 1 (Ann)"},
+                               "filters": ["active only"], "metrics": ["count"], "preferences": ["always top 10"],
+                               "findings": ["there are N customers"]})
+    r = agent(db, llm).ask("How many customers are there?", context=old)
+    assert r.context.entities == {"customer": "id 1 (Ann)"} and r.context.turns == 4
+    assert "customer = id 1 (Ann)" in r.context.as_text() and "always top 10" in r.context.as_text()
+    # build_context=False leaves the memory untouched and skips the LLM call
+    llm = ScriptedLLM({"reasoning": "x", "intent": "data_query", "model_name": ""}, ["SELECT COUNT(*) AS n FROM customers"])
+    r = agent(db, llm).ask("How many customers are there?", context=old, build_context=False)
+    assert r.context is old and "context" not in llm.calls

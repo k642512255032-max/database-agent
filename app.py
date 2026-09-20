@@ -28,16 +28,20 @@ MODE_INTENT = {"Data query": "data_query", "Statistics": "statistics", "Machine 
 # how each trace detail is rendered
 CODE_KEYS = {"sql", "validated_sql", "schema_given_to_model", "facts_given_to_model",
              "context_given_to_model", "facts", "previous_error", "original_question",
-             "standalone_question"}
+             "standalone_question", "turn_given_to_model", "updated_context"}
 TAG_KEYS = {"selected_tables", "columns", "available_models", "explanations",
-            "feature_names", "required_columns", "top_features"}
+            "feature_names", "required_columns", "top_features",
+            "entities", "filters", "metrics", "grouping", "ambiguities"}
 LABELS = {"sql": "Generated SQL", "validated_sql": "Validated SQL (what actually ran)",
           "schema_given_to_model": "Schema sent to the model",
           "facts_given_to_model": "Facts sent to the model",
-          "context_given_to_model": "Earlier conversation sent to the model",
+          "context_given_to_model": "Conversation memory sent to the model",
+          "turn_given_to_model": "This turn, as sent to the model",
+          "updated_context": "Updated conversation memory",
+          "standalone_question": "Standardised request", "ambiguities": "Assumptions made",
           "previous_error": "Error returned by the database", "plan": "Feature-engineering plan",
           "rows": "Rows", "rows_scored": "Rows scored", "raw_columns": "Raw columns",
-          "model_features": "Model features", "previous_turns_used": "Previous turns used"}
+          "model_features": "Model features"}
 
 EXAMPLES = {
 }
@@ -193,6 +197,7 @@ with st.sidebar:
                                 "(one extra answer-model call per question).")
     agent = get_agent(db_url, model)          # cached: keeps the introspected schema
     agent.answer_agent = AnswerAgent(OllamaLLM(model=answer_model or model))
+    agent.context_builder.llm = agent.answer_agent.llm      # memory summaries are prose: use the answer model
     agent.charts = charts_on
     agent.summarise_data = summary_on
 
@@ -245,7 +250,22 @@ with st.sidebar:
 
     st.markdown('<div class="side-label">Conversation</div>', unsafe_allow_html=True)
     remember = st.toggle("Remember conversation", value=True,
-                         help="Uses the last 3 answers to understand follow-ups like 'how old is he?'")
+                         help="After every answer a context-builder agent updates a compact memory (entities, "
+                              "filters, preferences, facts found). The next question is standardised against it, "
+                              "so follow-ups like 'how old is he?' resolve to concrete IDs.")
+    memory = next((r.context for _, r in reversed(st.session_state.get("history", [])) if r.context), None)
+    if remember and memory and not memory.is_empty():
+        with st.expander(f"Conversation memory · {memory.turns} turn{'s' if memory.turns != 1 else ''}"):
+            if memory.summary:
+                st.markdown(f'<p class="side-note">{esc(memory.summary)}</p>', unsafe_allow_html=True)
+            for title, values in (("Entities", [f"{k}: {v}" for k, v in memory.entities.items()]),
+                                  ("Filters", memory.filters), ("Metrics", memory.metrics),
+                                  ("Preferences", memory.preferences), ("Tables", memory.tables)):
+                if values:
+                    st.markdown(f'<span class="field-label">{title}</span>{tags(values)}', unsafe_allow_html=True)
+            if memory.findings:
+                st.markdown('<span class="field-label">Facts found</span>', unsafe_allow_html=True)
+                st.markdown("\n".join(f"- {f}" for f in memory.findings))
     if st.button("Clear chat", width="stretch"):
         st.session_state.history = []
         st.rerun()
@@ -459,6 +479,9 @@ def render_result(r: AgentResult) -> None:
     if r.standalone_question and r.standalone_question != r.question:
         st.markdown(f'<div class="rewrite">Understood as: <b>{esc(r.standalone_question)}</b></div>',
                     unsafe_allow_html=True)
+    if r.request and r.request.ambiguities:
+        st.markdown(f'<div class="rewrite">Assumed: {esc("; ".join(r.request.ambiguities))}</div>',
+                    unsafe_allow_html=True)
 
     meta = chip(INTENT_LABEL.get(r.intent, r.intent), "err" if r.error else "brand")
     if r.model_name:
@@ -577,7 +600,7 @@ if question:
 
             history = [r for _, r in st.session_state.history] if remember else []
             result = agent.ask(question, on_step=live, force_intent=intent, force_model=force_model,
-                               history=history)
+                               history=history, build_context=remember)
             status.update(label="Done" if not result.error else "Finished with errors",
                           state="complete" if not result.error else "error", expanded=False)
         render_result(result)

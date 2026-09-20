@@ -11,6 +11,8 @@ The LLM is a lightweight **Qwen2.5-Coder** model served by **Ollama**. Nothing l
 ```
  "Predict churn for premium customers in Hanoi"
         │
+ 0 Standardise request ─ LLM ─▶ standalone question + filters (plan = premium, city = Hanoi), metrics, sort, limit;
+                                references like "he" / "that city" resolved from the conversation memory
  1 Understand request ── LLM ─▶ intent = machine_learning, model = churn_random_forest
  2 Select tables ───────────▶ lexical schema linking (scores shown)
  3 Generate SQL ──────── LLM ─▶ SELECT * FROM customer_features WHERE plan='premium' AND city='Hanoi'
@@ -80,6 +82,9 @@ model yourself if the small LLM routes a question wrongly.
 2. Add **table and column comments** in MySQL. They are sent to the LLM and improve SQL accuracy a lot.
 3. For ML, create a **feature view** with one row per entity, for example `customer_features`. With a view,
    the agent only has to write `SELECT * FROM view WHERE ...` at inference time, which a 3B model handles reliably.
+   If the view is heavy (aggregates over millions of rows), materialise it as a table with the same name so
+   schema probes and inference queries stay fast. For the MySQL `employees` sample database this is done by
+   `sample_data/employees_features.sql` (the view) + `python sample_data/materialise_employee_features.py` (the table).
 4. Describe your models in `training_config.yaml`, then run `python train_models.py`.
 5. Restart the app, or click *Refresh schema* in the sidebar.
 
@@ -90,13 +95,24 @@ Each step records its **name, why it runs, the LLM's reasoning, inputs and outpu
 This includes the exact schema and facts that were sent to the model. Failed SQL attempts and their
 repairs stay visible. You can download the whole trace as text.
 
-### Follow-up questions (conversation memory)
-When *Remember conversation* is on (sidebar), the agent keeps the last 3 answers. If a new question refers to
-them (*he, his, those, that city, what about...*), the first step **Resolve follow-up question** rewrites it
-into a standalone question using the IDs/names from the previous result, e.g.
-*"Who is the oldest employee?"* → *"How old is he?"* becomes *"How old is employee emp_no 10001 (Georgi Facello)?"*.
-The rewritten question is shown under the answer (🔁 Understood as …) and the previous SQL + rows are also given
-to the SQL step. Turn the toggle off or click *Clear chat* to start fresh.
+### Request standardiser and conversation memory (`agent/request_agent.py`, `agent/context.py`)
+Two small agents sit around the pipeline:
+
+* **Request standardiser** (step 0, SQL model) turns every message into one explicit, standalone request:
+  typos fixed, abbreviations expanded (*dept* → department, *avg* → average), the measure named, and references
+  resolved from the memory, e.g. *"Who is the oldest employee?"* → *"How old is he?"* becomes
+  *"How old is employee emp_no 10001 (Georgi Facello)?"*. It also extracts **filters, metrics, grouping, time
+  range, sort, limit** and the **assumptions** it made (shown under the answer as *Assumed: …*). The router, table
+  linking and SQL generation all work from this standardised request, and the SQL prompt gets the extracted
+  details as a checklist.
+* **Context builder** (last step, answer model) runs after every answer and rewrites a compact memory:
+  a summary, the **entities in play** (with IDs), **standing filters**, **metrics of interest**, **user
+  preferences** (*"always show the top 10"*), the **tables used** and up to 8 **facts found** (with the concrete
+  numbers). It is shown in the sidebar (*Conversation memory*) and in the trace, and is what the next
+  standardiser call and SQL prompt see instead of a raw dump of earlier turns. If either LLM call fails the turn
+  still completes: the message is used as typed, and the memory is updated deterministically.
+
+Turn *Remember conversation* off to skip both the memory lookup and the update; *Clear chat* resets it.
 
 ### Answer agent and charts (`agent/answer_agent.py`)
 For statistics and ML answers a second model receives a **fact sheet** (row count, numeric summary, top categories,
@@ -168,6 +184,7 @@ train_models.py         one-off training → models/*.joblib + manifest.json
 training_config.yaml    which models to train, on which SQL
 agent/  config.py  db.py (schema, linking, SQL guard)  llm.py (Ollama JSON-schema output)
         prompts.py  orchestrator.py (the pipeline)  answer_agent.py (explanations + chart plans)
+        request_agent.py (request standardiser)  context.py (conversation memory + context builder)
         stats_tools.py  trace.py (explainability)
 ml/     features.py (auto FE)  registry.py (bundles)  inference.py (predict + explain)
 sample_data/seed_mysql.py   demo database

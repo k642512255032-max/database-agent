@@ -34,44 +34,117 @@ Request: {question}
 Answer as JSON with keys reasoning (one sentence), intent, model_name."""
 
 
-# ------------------------------------------------------------ follow-ups
-REWRITE_SYSTEM = """You turn a follow-up question into a STANDALONE question about a database.
-You get the previous conversation (questions, SQL and result rows) and a new question.
-- If the new question refers to earlier results (he, she, it, they, them, his, her, that, those, this one,
-  the same, what about, only, instead, also, ...), rewrite it so it can be answered WITHOUT the conversation.
-  Copy the concrete values it refers to from the previous results: IDs (e.g. emp_no = 10001), names, dates,
-  filters, departments.
-- If the new question is already self-contained, return it unchanged and set is_follow_up to false.
-- Do not answer the question. Do not invent values that are not in the conversation.
-Return JSON only."""
+# ------------------------------------------------- request standardiser
+REQUEST_SYSTEM = """You standardise a user's message about a database before it is turned into SQL.
+You get the conversation memory (what was discussed, entities and filters in play, facts already found),
+the previous query with its first rows, and the new message. Return JSON:
+- is_follow_up: true if the message refers to earlier turns (he, she, it, they, them, that, those, the same,
+  what about, only, instead, also, "and for X", a bare value like "2001" or "Marketing") or cannot be
+  answered on its own.
+- standalone_question: ONE clear, complete English question that can be answered WITHOUT the conversation.
+  Replace every reference with the concrete values from the memory / previous rows (IDs such as emp_no = 10001,
+  names, dates, departments). Keep the standing filters and user preferences from the memory that still apply.
+  Fix typos, expand abbreviations (dept -> department, avg -> average), name the measure explicitly
+  ("average salary", not "how much"). If the message is already clear, keep its wording.
+- task: lookup | list | count | aggregate | rank | compare | trend | analysis | prediction | other
+- entities: concrete things the request is about, e.g. ["employee emp_no 10001 (Georgi Facello)", "department Marketing"]
+- filters: conditions in plain words, e.g. ["hired after 2000-01-01", "current employees only"]
+- metrics: measures asked for, e.g. ["average salary", "number of employees"]
+- grouping: what to break figures down by, e.g. ["department", "hire year"]
+- time_range: e.g. "1995-2000"; "" if none
+- sort: e.g. "salary descending"; "" if none
+- limit: rows asked for (top 10 -> 10); 0 if none
+- ambiguities: assumptions you had to make, e.g. ["'best paid' taken as highest current salary"]
+Never answer the question. Never invent IDs, names or values that are not in the message or the memory."""
 
-REWRITE_SCHEMA = {
+REQUEST_SCHEMA = {
     "type": "object",
     "properties": {
         "reasoning": {"type": "string"},
         "is_follow_up": {"type": "boolean"},
         "standalone_question": {"type": "string"},
+        "task": {"type": "string", "enum": ["lookup", "list", "count", "aggregate", "rank", "compare", "trend",
+                                             "analysis", "prediction", "other"]},
+        "entities": {"type": "array", "items": {"type": "string"}},
+        "filters": {"type": "array", "items": {"type": "string"}},
+        "metrics": {"type": "array", "items": {"type": "string"}},
+        "grouping": {"type": "array", "items": {"type": "string"}},
+        "time_range": {"type": "string"},
+        "sort": {"type": "string"},
+        "limit": {"type": "integer"},
+        "ambiguities": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["reasoning", "is_follow_up", "standalone_question"],
+    "required": ["reasoning", "is_follow_up", "standalone_question", "task", "entities", "filters", "metrics",
+                 "grouping", "time_range", "sort", "limit", "ambiguities"],
 }
 
 
-def rewrite_user(conversation: str, question: str) -> str:
-    return f"""Previous conversation:
-{conversation}
+def request_user(memory: str, previous: str, question: str) -> str:
+    return f"""Conversation memory:
+{memory or "(empty - this is the first message)"}
 
-New question: {question}
+Previous turn:
+{previous or "(none)"}
 
-Example: previous question "Who is the oldest employee?" returned emp_no=10001, first_name=Georgi,
-last_name=Facello. New question "How old is he?" -> standalone_question
-"How old is employee emp_no 10001 (Georgi Facello)?"
+New message: {question}
+
+Example: memory says employee = emp_no 10001 (Georgi Facello); new message "how old is he?" ->
+is_follow_up true, standalone_question "How old is employee emp_no 10001 (Georgi Facello)?", task lookup,
+entities ["employee emp_no 10001 (Georgi Facello)"], metrics ["age"].
 JSON:"""
 
 
-def conversation_extra(conversation: str) -> str:
-    return f"""Earlier in this conversation (use it to resolve references and reuse IDs / filters):
-{conversation}
-"""
+# ------------------------------------------------------ context builder
+CONTEXT_SYSTEM = """You maintain a compact memory of a conversation between a user and a database assistant.
+You get the current memory and the latest turn (message, standardised request, SQL, result rows, answer).
+Return the UPDATED memory as JSON:
+- summary: 1-3 sentences on what the user has been exploring, most recent focus last.
+- entities: object {name: concrete value} for things still in play, with IDs, e.g.
+  {"employee": "emp_no 10001 (Georgi Facello)", "department": "d001 Marketing"}. Drop what the user moved away from.
+- filters: conditions the user keeps applying (e.g. "current employees only"). Drop one-off conditions.
+- metrics: measures the user cares about (e.g. "average salary").
+- preferences: standing instructions the user gave ("always show the top 10", "sort by salary descending").
+  Keep earlier ones unless the user changed them.
+- findings: up to 8 short facts established so far, newest last, each with its concrete numbers / IDs copied
+  exactly from the result rows or answer (e.g. "Oldest employee: emp_no 10001 Georgi Facello, born 1952-04-19").
+- tables: leave as given.
+- turns: leave as given.
+Keep it short. Never invent values that are not in the turn or the current memory. If the turn failed, keep the
+memory as it is and note the failure in the summary."""
+
+CONTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "summary": {"type": "string"},
+        "entities": {"type": "object", "additionalProperties": {"type": "string"}},
+        "filters": {"type": "array", "items": {"type": "string"}},
+        "metrics": {"type": "array", "items": {"type": "string"}},
+        "preferences": {"type": "array", "items": {"type": "string"}},
+        "findings": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["reasoning", "summary", "entities", "filters", "metrics", "preferences", "findings"],
+}
+
+
+def context_user(memory_json: str, turn: str) -> str:
+    return f"""Current memory (JSON):
+{memory_json}
+
+Latest turn:
+{turn}
+
+Return the updated memory as JSON:"""
+
+
+def context_extra(memory: str, request_details: str) -> str:
+    """Block for the SQL prompt: conversation memory + what the standardiser extracted."""
+    parts = []
+    if memory:
+        parts.append(f"Conversation memory (use it to resolve references and reuse IDs / filters):\n{memory}")
+    if request_details:
+        parts.append(f"Request details (already extracted from the question):\n{request_details}")
+    return "\n\n".join(parts) + ("\n" if parts else "")
 
 
 # --------------------------------------------------------------------- SQL

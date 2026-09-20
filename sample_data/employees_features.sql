@@ -5,6 +5,10 @@
 -- Run ONCE in MySQL Workbench as root (connected to your 3305 server), then:
 --     python train_models.py --config employees_training_config.yaml
 --
+-- The view is slow (it aggregates all 2.8M salary rows per query). For daily use turn it into a
+-- real table with the same name and columns:
+--     python sample_data/materialise_employee_features.py
+--
 -- The employees data ends in 2002, and rows still valid today have to_date = '9999-01-01'.
 
 USE employees;

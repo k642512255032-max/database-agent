@@ -2,6 +2,8 @@
 
 Pipeline (every box is a recorded, visible Step):
 
+  0 Standardise request ----> standalone question + filters / metrics / grouping / sort / limit
+                              (request_agent.py, reads the conversation memory)
   1 Understand request ----> intent: data_query | statistics | machine_learning (+ model)
   2 Select relevant tables    (lexical schema linking, scores shown)
   3 Generate SQL              (LLM, with its reasoning)
@@ -10,6 +12,7 @@ Pipeline (every box is a recorded, visible Step):
   6a statistics:  choose method -> run test -> interpretation
   6b ML:          check columns -> feature engineering -> inference -> explanations
   7 Write answer              (LLM summary grounded in computed facts)
+  8 Update conversation context (context.py: entities, filters, preferences, facts for the next turn)
 """
 from __future__ import annotations
 
@@ -27,15 +30,13 @@ from ml.registry import ModelRegistry
 from . import prompts, stats_tools
 from .answer_agent import AnswerAgent
 from .config import settings
+from .context import ContextBuilder, ConversationContext
 from .db import Database, UnsafeSQLError
 from .llm import OllamaLLM
+from .request_agent import RequestStandardizer, StandardRequest, previous_turn_text
 from .trace import Step, Trace
 
 ML_WORDS = r"predict|forecast|classif|cluster|segment|group similar|anomal|outlier|unusual|suspicious|fraud|pca|principal component|churn risk|likely to"
-FOLLOW_UP_WORDS = (r"\b(he|she|him|his|her|hers|it|its|they|them|their|that|those|this|these|same|what about|how about|"
-                   r"and for|instead|also|only|just|more|less|previous|above|first one|second one|last one|the one|"
-                   r"same|again|why|sort|order them|top)\b")
-MAX_HISTORY_TURNS = 3
 STATS_WORDS = r"correlat|significan|t-test|ttest|anova|chi|regression|relationship|distribution|normal|variance|hypothesis|statistic|describe"
 
 
@@ -43,7 +44,9 @@ STATS_WORDS = r"correlat|significan|t-test|ttest|anova|chi|regression|relationsh
 class AgentResult:
     question: str
     trace: Trace
-    standalone_question: Optional[str] = None   # the question after resolving follow-up references
+    standalone_question: Optional[str] = None   # the question after the request standardiser
+    request: Optional[StandardRequest] = None   # structured request (filters, metrics, sort, ...)
+    context: Optional[ConversationContext] = None   # conversation memory AFTER this turn
     intent: str = "data_query"
     sql: Optional[str] = None
     data: Optional[pd.DataFrame] = None
@@ -69,12 +72,16 @@ class AgentResult:
 class DataAgent:
     def __init__(self, db: Database | None = None, llm: Any | None = None,
                  registry: ModelRegistry | None = None, answer_agent: AnswerAgent | None = None,
-                 charts: bool = True, summarise_data: bool | None = None):
+                 charts: bool = True, summarise_data: bool | None = None,
+                 standardizer: RequestStandardizer | None = None, context_builder: ContextBuilder | None = None):
         self.db = db or Database()
         self.llm = llm or OllamaLLM()
         self.registry = registry or ModelRegistry()
         # the answer agent defaults to the same LLM in tests / when no separate model is configured
         self.answer_agent = answer_agent or AnswerAgent(llm if llm is not None and not settings.answer_model else None)
+        # step 0: the standardiser shares the SQL model; step 8: the context builder shares the answer model
+        self.standardizer = standardizer or RequestStandardizer(self.llm)
+        self.context_builder = context_builder or ContextBuilder(self.answer_agent.llm)
         self.charts = charts
         # plain-English summary for data queries; costs one answer-model call per query
         self.summarise_data = settings.summarise_data_queries if summarise_data is None else summarise_data
@@ -82,14 +89,20 @@ class DataAgent:
     # ================================================================ public
     def ask(self, question: str, on_step: Callable[[Step], None] | None = None,
             force_intent: str | None = None, force_model: str | None = None,
-            history: list["AgentResult"] | None = None) -> AgentResult:
-        """history = previous AgentResults of this chat (oldest first) for follow-up questions."""
+            history: list["AgentResult"] | None = None, context: ConversationContext | None = None,
+            build_context: bool = True) -> AgentResult:
+        """history = previous AgentResults of this chat (oldest first). The conversation memory is taken
+        from `context`, else from the last history entry; build_context=False skips updating it."""
         trace = Trace(question, on_step=on_step)
         res = AgentResult(question, trace)
         res.standalone_question = question
+        history = history or []
+        ctx = context or next((h.context for h in reversed(history) if h.context is not None),
+                              ConversationContext())
         self._conversation = ""
+        self._conversation_tables_hint = ""
         try:
-            self._resolve_follow_up(res, history or [])
+            self._standardise(res, ctx, history)
             self._route(res, force_intent, force_model)
             tables = self._link_tables(res)
             self._generate_and_run_sql(res, tables)
@@ -101,46 +114,31 @@ class DataAgent:
         except Exception as exc:
             res.error = f"{type(exc).__name__}: {exc}"
             res.answer = f"I could not complete this request: {exc}"
+        if build_context:
+            try:
+                res.context = self.context_builder.update(ctx, res, trace)
+            except Exception:   # the answer is already there; never lose it over the memory update
+                res.context = ctx
+        else:
+            res.context = ctx
         return res
 
-    # ================================================== 0. follow-up questions
+    # ============================================== 0. request standardiser
     _conversation_tables_hint = ""
 
-    def _resolve_follow_up(self, res: AgentResult, history: list[AgentResult]) -> None:
-        turns = [h for h in history if h.sql or h.answer][-MAX_HISTORY_TURNS:]
-        self._conversation_tables_hint = ""
-        if not turns:
-            return
-        conversation = "\n\n".join(_turn_context(h) for h in turns)
-        q = res.question.strip()
-        looks_like_follow_up = bool(re.search(FOLLOW_UP_WORDS, q.lower())) or len(q.split()) <= 5
-        with res.trace.step("Resolve follow-up question",
-                            "Check whether the question refers to earlier answers (e.g. 'he', 'those') and "
-                            "rewrite it into a standalone question.") as s:
-            s.add(previous_turns_used=len(turns))
-            if not looks_like_follow_up:
-                s.add(decision="No reference words found - treated as a new, independent question.")
-                return
-            try:
-                out = self.llm.chat_json(prompts.REWRITE_SYSTEM, prompts.rewrite_user(conversation, q),
-                                         prompts.REWRITE_SCHEMA)
-            except Exception as exc:
-                s.status = "warning"
-                s.add(note=f"Rewrite failed ({exc}); the earlier conversation is still given to the SQL step.")
-                self._conversation = conversation
-                return
-            s.reasoning = out.get("reasoning")
-            standalone = (out.get("standalone_question") or "").strip()
-            if out.get("is_follow_up") and standalone:
-                res.standalone_question = standalone
-                self._conversation = conversation
-                # keep the tables of the previous query in scope
-                last_sql = next((h.sql for h in reversed(turns) if h.sql), "")
-                self._conversation_tables_hint = " ".join(re.findall(r"(?:from|join)\s+`?(\w+)", last_sql, re.I))
-                s.add(decision="Follow-up question", original_question=q, standalone_question=standalone,
-                      context_given_to_model=conversation)
-            else:
-                s.add(decision="Independent question - no rewrite needed.")
+    def _standardise(self, res: AgentResult, ctx: ConversationContext, history: list[AgentResult]) -> None:
+        last = next((h for h in reversed(history) if h.sql or h.answer), None)
+        previous = previous_turn_text(last.standalone_question or last.question, last.sql, last.frame(),
+                                      last.answer) if last else ""
+        req = self.standardizer.standardize(res.question, ctx, previous, res.trace)
+        res.request, res.standalone_question = req, req.standalone_question
+        res.extras["request"] = req.to_dict()
+        memory = ctx.as_text()
+        if req.is_follow_up and not memory and previous:
+            memory = previous   # no memory yet (e.g. the earlier turn was not remembered): give the raw turn
+        self._conversation = prompts.context_extra(memory, req.details_text())
+        if req.is_follow_up:
+            self._conversation_tables_hint = " ".join(ctx.tables)
 
     # ============================================================ 1. router
     def _route(self, res: AgentResult, force_intent: str | None, force_model: str | None) -> None:
@@ -226,7 +224,7 @@ class DataAgent:
         elif res.intent == "statistics":
             extra = prompts.stats_sql_extra()
         if self._conversation:
-            extra = prompts.conversation_extra(self._conversation) + "\n" + extra
+            extra = self._conversation + "\n" + extra
 
         with res.trace.step("Generate SQL", "Translate the English request into a SQL query using the schema.") as s:
             out = self.llm.chat_json(prompts.SQL_SYSTEM.format(dialect=dialect),
@@ -354,22 +352,6 @@ class DataAgent:
 
 
 # ---------------------------------------------------------------- helpers
-def _turn_context(r: AgentResult, max_rows: int = 5) -> str:
-    lines = [f"Question: {r.standalone_question or r.question}"]
-    if r.sql:
-        lines.append(f"SQL: {r.sql}")
-    if r.data is not None:
-        preview = r.data.head(max_rows)
-        if r.ml is not None:
-            preview = pd.concat([r.ml.output.head(max_rows).reset_index(drop=True),
-                                 r.data.drop(columns=[c for c in r.ml.output.columns if c in r.data.columns])
-                                 .head(max_rows).reset_index(drop=True)], axis=1)
-        lines.append(f"Result: {len(r.data)} rows. First rows:\n{preview.to_string(index=False, max_colwidth=40)}")
-    if r.answer:
-        lines.append(f"Answer: {r.answer[:400]}")
-    return "\n".join(lines)
-
-
 def _clean_sql(sql: str) -> str:
     sql = re.sub(r"^```(?:sql)?|```$", "", sql.strip(), flags=re.I | re.M).strip()
     return sql
