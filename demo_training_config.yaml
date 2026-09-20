@@ -1,0 +1,80 @@
+# Models trained ONCE by `python train_models.py`. The agent only runs inference on them.
+# Tip: point `sql` at a feature VIEW so the agent can reproduce the columns with a simple
+#      "SELECT * FROM view WHERE ..." at inference time.
+#
+# algorithm: decision_tree | random_forest | knn | kmeans | pca | isolation_forest | dbscan
+# task:      classification | regression | clustering | dimensionality_reduction | anomaly_detection
+
+models:
+  # ---------------- supervised ----------------
+  - name: churn_decision_tree
+    algorithm: decision_tree
+    task: classification
+    description: Predicts whether a customer will churn; explainable decision rules
+    sql: SELECT * FROM customer_features
+    target: churned
+    id_column: customer_id
+    params: {max_depth: 4, min_samples_leaf: 20, class_weight: balanced}
+
+  - name: churn_random_forest
+    algorithm: random_forest
+    task: classification
+    description: Predicts customer churn probability with a random forest (most accurate)
+    sql: SELECT * FROM customer_features
+    target: churned
+    id_column: customer_id
+    params: {n_estimators: 200, max_depth: 8, min_samples_leaf: 5, class_weight: balanced}
+
+  - name: churn_knn
+    algorithm: knn
+    task: classification
+    description: Predicts churn by comparing a customer with the most similar past customers
+    sql: SELECT * FROM customer_features
+    target: churned
+    id_column: customer_id
+    params: {n_neighbors: 15, weights: distance}
+
+  - name: spend_random_forest
+    algorithm: random_forest
+    task: regression
+    description: Predicts a customer's total spend (lifetime value) from profile and activity
+    sql: SELECT customer_id, age, gender, city, plan, monthly_fee, tenure_months, support_tickets, total_orders, total_spent FROM customer_features
+    target: total_spent
+    id_column: customer_id
+    params: {n_estimators: 200, max_depth: 10}
+
+  # ---------------- unsupervised ----------------
+  - name: customer_segments_kmeans
+    algorithm: kmeans
+    task: clustering
+    description: Segments customers into groups with similar behaviour
+    sql: SELECT * FROM customer_features
+    id_column: customer_id
+    exclude: [churned]
+    params: {n_clusters: 4, n_init: 10}
+
+  - name: customer_pca
+    algorithm: pca
+    task: dimensionality_reduction
+    description: Compresses customer attributes into principal components for visualisation
+    sql: SELECT * FROM customer_features
+    id_column: customer_id
+    exclude: [churned]
+    params: {n_components: 3}
+
+  - name: order_anomaly_isoforest
+    algorithm: isolation_forest
+    task: anomaly_detection
+    description: Detects unusual or suspicious orders (possible fraud)
+    sql: SELECT * FROM order_features
+    id_column: order_id
+    exclude: [customer_id, order_date]   # calendar dates would make old orders look 'anomalous'
+    params: {n_estimators: 300, contamination: 0.02}
+
+  - name: customer_density_dbscan
+    algorithm: dbscan
+    task: clustering
+    description: Density-based customer clusters; flags customers that fit no group as noise
+    sql: SELECT customer_id, age, monthly_fee, tenure_months, support_tickets, total_orders, total_spent, days_since_last_order FROM customer_features
+    id_column: customer_id
+    params: {eps: auto, min_samples: 10}

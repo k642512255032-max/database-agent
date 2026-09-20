@@ -1,0 +1,27 @@
+# Visual theme for the Streamlit UI (app.py). Local fonts only - nothing is fetched.
+
+[theme]
+base                      = "light"
+primaryColor              = "#2F5BEA"
+backgroundColor           = "#FFFFFF"
+secondaryBackgroundColor  = "#F5F7FB"
+textColor                 = "#0F172A"
+linkColor                 = "#2F5BEA"
+borderColor               = "#E5E9F0"
+baseRadius                = "0.55rem"
+buttonRadius              = "0.5rem"
+baseFontSize              = 15
+codeFontSize              = "0.82rem"
+showWidgetBorder          = true
+headingFontWeights        = [650, 640, 620]
+
+[theme.sidebar]
+backgroundColor           = "#FAFBFD"
+secondaryBackgroundColor  = "#F1F4F9"
+borderColor               = "#E5E9F0"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

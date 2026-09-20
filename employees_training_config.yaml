@@ -1,0 +1,92 @@
+# Models for the MySQL "employees" sample database.
+# 1) Create the view first: run sample_data/employees_features.sql in MySQL Workbench
+# 2) python train_models.py --config employees_training_config.yaml
+#
+# max_train_rows: the full employees DB has 300,024 employees. A random sample keeps training
+# fast (KNN / DBSCAN are slow on huge data). Predictions still run on any rows you ask about.
+
+models:
+  # ---------------- supervised: will an employee leave? ----------------
+  - name: attrition_decision_tree
+    algorithm: decision_tree
+    task: classification
+    description: Predicts whether an employee leaves the company (attrition), explainable rules
+    sql: SELECT * FROM employee_features
+    target: left_company
+    id_column: emp_no
+    exclude: [years_of_service, salary_records]   # these directly reveal how long someone stayed
+    max_train_rows: 50000
+    params: {max_depth: 4, min_samples_leaf: 50, class_weight: balanced}
+
+  - name: attrition_random_forest
+    algorithm: random_forest
+    task: classification
+    description: Predicts employee attrition probability with a random forest (most accurate)
+    sql: SELECT * FROM employee_features
+    target: left_company
+    id_column: emp_no
+    exclude: [years_of_service, salary_records]
+    max_train_rows: 50000
+    params: {n_estimators: 150, max_depth: 10, min_samples_leaf: 10, class_weight: balanced, n_jobs: -1}
+
+  - name: attrition_knn
+    algorithm: knn
+    task: classification
+    description: Predicts attrition by comparing an employee with the most similar past employees
+    sql: SELECT * FROM employee_features
+    target: left_company
+    id_column: emp_no
+    exclude: [years_of_service, salary_records]
+    max_train_rows: 20000
+    params: {n_neighbors: 25, weights: distance}
+
+  # ---------------- supervised: salary ----------------
+  - name: salary_random_forest
+    algorithm: random_forest
+    task: regression
+    description: Predicts an employee's highest salary from department, title, gender, age and tenure
+    sql: SELECT emp_no, gender, age_at_hire, hire_year, department, current_title, n_titles, is_manager, years_of_service, max_salary FROM employee_features
+    target: max_salary
+    id_column: emp_no
+    max_train_rows: 50000
+    params: {n_estimators: 150, max_depth: 12, n_jobs: -1}
+
+  # ---------------- unsupervised ----------------
+  - name: employee_segments_kmeans
+    algorithm: kmeans
+    task: clustering
+    description: Segments employees into groups with similar careers and salaries
+    sql: SELECT * FROM employee_features
+    id_column: emp_no
+    exclude: [left_company]
+    max_train_rows: 50000
+    params: {n_clusters: 4, n_init: 10}
+
+  - name: employee_pca
+    algorithm: pca
+    task: dimensionality_reduction
+    description: Compresses employee attributes into principal components for visualisation
+    sql: SELECT * FROM employee_features
+    id_column: emp_no
+    exclude: [left_company]
+    max_train_rows: 50000
+    params: {n_components: 3}
+
+  - name: salary_anomaly_isoforest
+    algorithm: isolation_forest
+    task: anomaly_detection
+    description: Detects employees with unusual or suspicious salary patterns (outliers)
+    sql: SELECT * FROM employee_features
+    id_column: emp_no
+    exclude: [left_company]
+    max_train_rows: 50000
+    params: {n_estimators: 200, contamination: 0.01}
+
+  - name: employee_density_dbscan
+    algorithm: dbscan
+    task: clustering
+    description: Density-based employee clusters; flags employees that fit no group as noise
+    sql: SELECT emp_no, age_at_hire, hire_year, n_titles, min_salary, max_salary, salary_growth_pct, years_of_service FROM employee_features
+    id_column: emp_no
+    max_train_rows: 15000
+    params: {eps: auto, min_samples: 15}
