@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent.answer_agent import AnswerAgent  # noqa: E402
 from agent.db import Database, UnsafeSQLError  # noqa: E402
 from agent.orchestrator import DataAgent  # noqa: E402
 from ml.registry import ModelRegistry  # noqa: E402
@@ -39,7 +40,7 @@ class ScriptedLLM:
         if system.startswith("You choose"):
             self.calls.append("stats")
             return self.stats
-        if system.startswith("You are a senior data analyst"):      # answer agent
+        if system.startswith(("You are a senior data analyst", "You summarise")):      # answer agent
             self.calls.append("answer")
             return {"answer": "scripted answer", "key_findings": ["f1"], "interpretation": "i", "caveats": []}
         if system.startswith("You are a data-visualisation planner"):  # chart planner -> heuristic fallback
@@ -60,8 +61,9 @@ def db():
     return Database(os.getenv("DATABASE_URL", "mysql+pymysql://agent_ro:agent_ro_pw@127.0.0.1:3306/shop"))
 
 
-def agent(db, llm):
-    return DataAgent(db=db, llm=llm, registry=ModelRegistry())
+def agent(db, llm, **kw):
+    # answer_agent is passed explicitly so a configured OLLAMA_ANSWER_MODEL never makes tests call real Ollama
+    return DataAgent(db=db, llm=llm, registry=ModelRegistry(), answer_agent=AnswerAgent(llm), **kw)
 
 
 # ------------------------------------------------------------------ guard
@@ -121,6 +123,36 @@ def test_data_query_with_repair(db):
     assert len(r.data) == 5 and "fix" in llm.calls
     assert any(s.name.startswith("Repair SQL") for s in r.trace.steps)
     print(r.trace.as_text())
+
+
+TOP_CITIES_SQL = ("SELECT c.city, SUM(o.total_amount) AS revenue FROM orders o JOIN customers c "
+                  "ON c.customer_id=o.customer_id WHERE o.status='completed' GROUP BY c.city ORDER BY revenue DESC LIMIT 5")
+
+
+def test_data_query_summary_uses_answer_model(db):
+    """With the toggle on, a plain data query gets a plain-English summary from the answer agent."""
+    llm = ScriptedLLM({"reasoning": "list", "intent": "data_query", "model_name": ""}, [TOP_CITIES_SQL])
+    r = agent(db, llm, summarise_data=True).ask("Top 5 cities by revenue")
+    assert r.error is None, r.trace.as_text()
+    assert "answer" in llm.calls and r.extras.get("summarised") is True
+    assert r.answer.startswith("scripted answer") and "- f1" in r.answer
+    assert "Interpretation" not in r.answer and "Caveats" not in r.answer     # brief mode: no analyst sections
+    assert any("Question: Top 5 cities by revenue" in p and "FACT SHEET" in p for p in llm.prompts)
+
+
+def test_data_query_summary_can_be_switched_off(db):
+    llm = ScriptedLLM({"reasoning": "list", "intent": "data_query", "model_name": ""}, [TOP_CITIES_SQL])
+    r = agent(db, llm, summarise_data=False).ask("Top 5 cities by revenue")
+    assert r.error is None and "answer" not in llm.calls
+    assert r.answer == "5 rows returned." and not r.extras.get("summarised")
+
+
+def test_data_query_summary_skips_empty_result(db):
+    llm = ScriptedLLM({"reasoning": "list", "intent": "data_query", "model_name": ""},
+                      ["SELECT city FROM customers WHERE city = 'Nowhere'"])
+    r = agent(db, llm, summarise_data=True).ask("Customers in Nowhere")
+    assert r.error is None and "answer" not in llm.calls
+    assert r.answer == "0 rows returned." and not r.extras.get("summarised")
 
 
 def test_statistics_ttest(db):

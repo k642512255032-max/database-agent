@@ -56,6 +56,8 @@ class Settings:
     # A general instruct model (e.g. qwen2.5:7b-instruct) writes far better prose than a coder model.
     answer_model: str = os.getenv("OLLAMA_ANSWER_MODEL", "")
     max_charts: int = int(os.getenv("MAX_CHARTS", "2"))
+    # Also write a short plain-English summary for plain data queries (one extra answer-model call per query).
+    summarise_data_queries: bool = os.getenv("SUMMARISE_DATA_QUERIES", "1") not in ("0", "false", "no", "")
 
     # --- Agent --------------------------------------------------------------
     max_sql_retries: int = int(os.getenv("MAX_SQL_RETRIES", "3"))

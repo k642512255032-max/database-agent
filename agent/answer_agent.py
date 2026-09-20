@@ -43,6 +43,24 @@ statistic in a few words (e.g. "p = 0.28, i.e. a difference this small could eas
 If a statistic is nan / missing or there are too few rows (e.g. a test on 2 rows), the answer must say the analysis
 could not be computed and why - never conclude anything from a nan."""
 
+DATA_SUMMARY_SYSTEM = """You summarise the result of a database query for a business user, in plain English.
+You get the question and a FACT SHEET (row count, columns, numeric summary, top values, sample rows). Return JSON with:
+- answer: 2-4 sentences saying what the table shows and the key numbers (the largest / smallest values, totals,
+  the leader and the runner-up, a notable gap or outlier). Lead with the direct answer to the question.
+- key_findings: 0-3 short bullet strings with one concrete number each; leave empty if the answer already says it all.
+Rules: use ONLY numbers in the fact sheet; never invent, extrapolate or explain causes. Round sensibly (2 decimals,
+thousands separators). Do not mention SQL, column types or tools. Do not repeat the question. If the sample rows are
+only part of the result, describe the whole table (from the row count and summary), not just the sample."""
+
+DATA_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "key_findings": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["answer", "key_findings"],
+}
+
 ANSWER_SCHEMA = {
     "type": "object",
     "properties": {
@@ -55,8 +73,9 @@ ANSWER_SCHEMA = {
 }
 
 
-def answer_markdown(out: dict) -> str:
-    parts = [f"**Answer** — {out.get('answer', '').strip()}"]
+def answer_markdown(out: dict, brief: bool = False) -> str:
+    # a brief data-query summary sits above the table and needs no 'Answer' heading
+    parts = [out.get('answer', '').strip() if brief else f"**Answer** — {out.get('answer', '').strip()}"]
     if out.get("key_findings"):
         parts.append("**Key findings**\n" + "\n".join(f"- {f}" for f in out["key_findings"] if f))
     if out.get("interpretation"):
@@ -112,18 +131,21 @@ class AnswerAgent:
         self.llm = llm or OllamaLLM(model=settings.answer_model or settings.model)
 
     # =============================================================== answer
-    def compose(self, res: "AgentResult", trace: Trace) -> str:
-        with trace.step("Compose the answer (answer agent)",
+    def compose(self, res: "AgentResult", trace: Trace, brief: bool = False) -> str:
+        """Full analyst answer, or with brief=True a short plain-English summary of a data query."""
+        system, schema = (DATA_SUMMARY_SYSTEM, DATA_SUMMARY_SCHEMA) if brief else (ANSWER_SYSTEM, ANSWER_SCHEMA)
+        with trace.step("Summarise the result (answer agent)" if brief else "Compose the answer (answer agent)",
+                        "A second model describes what the result table shows, in plain English." if brief else
                         "A second model turns the computed facts into a coherent explanation: answer, "
                         "key findings, interpretation and caveats.") as s:
             facts = fact_sheet(res)
             s.add(model=getattr(self.llm, "model", "?"), facts_given_to_model=facts)
             try:
-                out = self.llm.chat_json(ANSWER_SYSTEM, f"Question: {res.standalone_question}\n\nFACT SHEET:\n{facts}",
-                                         ANSWER_SCHEMA)
+                out = self.llm.chat_json(system, f"Question: {res.standalone_question}\n\nFACT SHEET:\n{facts}", schema)
+                out = {k: out.get(k) for k in schema["properties"]}     # brief mode renders only its own fields
                 if not (out.get("answer") or "").strip():
                     raise ValueError("empty answer")
-                return answer_markdown(out)
+                return answer_markdown(out, brief=brief)
             except Exception as exc:
                 s.status = "warning"
                 s.add(note=f"Answer agent failed ({exc}); showing the raw facts instead.")
