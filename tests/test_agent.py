@@ -91,6 +91,23 @@ def test_read_only_session(db):
             c.execute(text("INSERT INTO customers (customer_id, full_name) VALUES (99999, 'x')"))
 
 
+def test_schema_probe_failures_are_logged(caplog, monkeypatch):
+    import logging
+    from sqlalchemy import text
+    d = Database("sqlite://")
+    with d.engine.begin() as c:
+        c.execute(text("CREATE TABLE t (id INTEGER PRIMARY KEY, d DATE)"))
+    # make every probe hit a non-existent table so they all raise
+    monkeypatch.setattr(d, "quote", lambda name: '"no_such_table"')
+    with caplog.at_level(logging.WARNING, logger="agent.db"):
+        schema = d.schema(refresh=True)
+    assert "t" in schema and schema["t"].row_count is None      # still degrades gracefully
+    msgs = [r.getMessage() for r in caplog.records if r.name == "agent.db"]
+    assert any("row-count probe failed for t:" in m for m in msgs), msgs
+    assert any("sample" in m for m in msgs), msgs
+    assert any("sentinel" in m or "date" in m for m in msgs), msgs
+
+
 # ------------------------------------------------------------- pipelines
 def test_data_query_with_repair(db):
     llm = ScriptedLLM(

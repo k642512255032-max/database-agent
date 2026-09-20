@@ -9,7 +9,7 @@ Safety is enforced in three layers:
 from __future__ import annotations
 
 import difflib
-
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -20,6 +20,8 @@ from sqlalchemy import create_engine, event, inspect, text
 from sqlglot import exp
 
 from .config import settings
+
+log = logging.getLogger(__name__)
 
 FORBIDDEN_NODES = tuple(
     getattr(exp, n)
@@ -99,7 +101,8 @@ class Database:
                 ]
                 try:
                     comment = insp.get_table_comment(t).get("text")
-                except Exception:
+                except Exception as exc:
+                    log.warning("table-comment probe failed for %s: %s", t, exc)
                     comment = None
             info = TableInfo(t, cols, pk, fks, comment=comment)
             q = self.quote(t)
@@ -108,13 +111,15 @@ class Database:
             with self.engine.connect() as c:
                 try:
                     info.row_count = int(c.execute(text(f"SELECT {hint}COUNT(*) FROM {q}")).scalar())
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("row-count probe failed for %s: %s", t, exc)
                 try:
                     rows = c.execute(text(f"SELECT {hint}* FROM {q} LIMIT {settings.sample_rows_per_table}"))
                     info.sample = [dict(r._mapping) for r in rows]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # this probe fetches real rows: keep data out of the default log, full text only at DEBUG
+                    log.warning("sample-rows probe failed for %s: %s", t, type(exc).__name__)
+                    log.debug("sample-rows probe failed for %s", t, exc_info=True)
                 # open-ended date sentinel (e.g. to_date = 9999-01-01 means "still current")
                 for col in cols:
                     if not col["type"].upper().startswith(("DATE", "TIMESTAMP")):
@@ -124,8 +129,8 @@ class Database:
                         hit = c.execute(text(f"SELECT {hint}{qc} FROM {q} WHERE {qc} >= '9000-01-01' LIMIT 1")).scalar()
                         if hit is not None:
                             col["note"] = f"{hit} means still current / open-ended"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.warning("date-sentinel probe failed for %s.%s: %s", t, col["name"], exc)
             out[t] = info
         self._schema = out
         return out
