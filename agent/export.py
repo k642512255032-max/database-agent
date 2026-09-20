@@ -42,6 +42,7 @@ def export_filenames(question: str) -> dict[str, str]:
         "csv": f"{slug}.csv",
         "xlsx": f"{slug}.xlsx",
         "png": f"{slug}-chart-{{i}}.png",
+        "pbip": f"{slug}-powerbi.zip",
     }
 
 

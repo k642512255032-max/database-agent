@@ -12,6 +12,7 @@ from agent.answer_agent import AnswerAgent
 from agent.config import settings
 from agent.db import Database
 from agent.export import EXCEL_MAX_ROWS, chart_to_png, export_filenames, to_csv_bytes, to_xlsx_bytes
+from agent.powerbi import to_pbip_bytes
 from agent.llm import OllamaLLM
 from agent.orchestrator import AgentResult, DataAgent
 from agent.trace import Step
@@ -195,6 +196,13 @@ with st.sidebar:
     summary_on = st.toggle("Summarise data queries", value=settings.summarise_data_queries,
                            help="Add a short plain-English summary above the result table of plain data queries "
                                 "(one extra answer-model call per question).")
+    pbi_source = st.radio("Power BI data source", ["Live MySQL query", "Embedded rows"],
+                          index=0 if settings.powerbi_source == "live" else 1, horizontal=True,
+                          help="Live: the .pbip runs the generated SQL against MySQL when refreshed (needs MySQL "
+                               "Connector/NET on the Power BI machine). Embedded: the rows are stored in the file. "
+                               "ML answers are always embedded.")
+    st.session_state["pbi_source"] = "live" if pbi_source.startswith("Live") else "inline"
+    st.session_state["db_url"] = db_url
     agent = get_agent(db_url, model)          # cached: keeps the introspected schema
     agent.answer_agent = AnswerAgent(OllamaLLM(model=answer_model or model))
     agent.context_builder.llm = agent.answer_agent.llm      # memory summaries are prose: use the answer model
@@ -296,7 +304,7 @@ def render_value(key: str, value) -> None:
 
 
 def export_row(r: AgentResult, data: pd.DataFrame, where: str) -> None:
-    """CSV / Excel download buttons for a result table. `where` keeps widget keys unique per placement."""
+    """CSV / Excel / Power BI download buttons for a result table. `where` keeps widget keys unique per placement."""
     if data is None or data.empty:
         return
     names = export_filenames(r.standalone_question or r.question)
@@ -305,11 +313,12 @@ def export_row(r: AgentResult, data: pd.DataFrame, where: str) -> None:
         extra_sheets = {k: v if isinstance(v, pd.DataFrame) else pd.DataFrame(v)
                         for k, v in r.stats["tables"].items()}
     cache = r.extras.setdefault("_export", {})    # results persist in session_state: build each file once
-    c1, c2, _ = st.columns([1, 1, 4])
+    c1, c2, c3, _ = st.columns([1, 1, 1, 3])
     if "csv" not in cache:
         cache["csv"] = to_csv_bytes(data)
     c1.download_button("Download CSV", cache["csv"], file_name=names["csv"], mime="text/csv",
                        key=f"csv_{where}_{id(r)}")
+    export_powerbi(r, data, extra_sheets, names["pbip"], c3, where)
     if "xlsx" not in cache:
         try:
             cache["xlsx"] = to_xlsx_bytes(data, extra_sheets=extra_sheets)
@@ -324,6 +333,29 @@ def export_row(r: AgentResult, data: pd.DataFrame, where: str) -> None:
                        key=f"xlsx_{where}_{id(r)}")
     if truncated:
         st.caption(f"Excel sheet limited to {EXCEL_MAX_ROWS:,} rows")
+
+
+def export_powerbi(r: AgentResult, data: pd.DataFrame, extra_tables: dict | None, fname: str, col, where: str) -> None:
+    """Download button for a Power BI project (.pbip in a zip): the result table, the planned charts and the SQL."""
+    cache = r.extras["_export"]
+    source = st.session_state.get("pbi_source", settings.powerbi_source)
+    if cache.get("pbip_source") != source:      # rebuild only when the sidebar choice changes
+        try:
+            cache["pbip"] = to_pbip_bytes(r.standalone_question or r.question, r.answer, r.sql, data, r.charts,
+                                          extra_tables, source=source, has_ml=r.ml is not None,
+                                          database_url=st.session_state.get("db_url"))
+        except Exception as exc:   # a failing export must never break the page
+            cache["pbip"] = (None, str(exc))
+        cache["pbip_source"] = source
+    pbip, note = cache["pbip"]
+    if pbip is None:
+        st.caption(f"Power BI export unavailable: {note}")
+        return
+    col.download_button("Download Power BI", pbip, file_name=fname, mime="application/zip",
+                        key=f"pbip_{where}_{id(r)}", help="A Power BI Project (.pbip) with the table, charts and SQL. "
+                                                          "Unzip and open the .pbip in Power BI Desktop.")
+    if note:
+        st.caption(note)
 
 
 def render_step(s: Step) -> None:

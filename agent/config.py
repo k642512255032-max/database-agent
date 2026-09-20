@@ -68,5 +68,11 @@ class Settings:
     # --- ML -----------------------------------------------------------------
     models_dir: Path = Path(os.getenv("MODELS_DIR", str(ROOT / "models")))
 
+    # --- Power BI export ---------------------------------------------------
+    # "live": the .pbip queries MySQL with the generated SQL (needs MySQL Connector/NET on the Power BI machine);
+    # "inline": the result rows are embedded in the semantic model, nothing to install, no refresh.
+    powerbi_source: str = os.getenv("POWERBI_SOURCE", "live")
+    powerbi_inline_max_rows: int = int(os.getenv("POWERBI_INLINE_MAX_ROWS", "5000"))
+
 
 settings = Settings()

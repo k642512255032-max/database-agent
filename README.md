@@ -21,14 +21,16 @@ The LLM is a lightweight **Qwen2.5-Coder** model served by **Ollama**. Nothing l
  6 Load model → Feature engineering → Inference → Explanations
  7 Answer agent ── 2nd LLM ─▶ answer / key findings / interpretation / caveats, built only from computed facts
  8 Chart planner ─ 2nd LLM ─▶ chart spec (bar, line, scatter, histogram, box) validated against the real columns
+ 9 Context builder ─ 2nd LLM ─▶ updates the conversation memory (entities, filters, preferences, facts found)
 ```
 
 Two models do two jobs: a **coder** model writes SQL (`OLLAMA_MODEL`), a **general instruct** model explains the
 results and plans the charts (`OLLAMA_ANSWER_MODEL`, e.g. `qwen2.5:7b-instruct`). Plain data queries skip the
 prose and show the SQL and the result table directly.
 
-Results can be downloaded as **CSV** or **Excel** (statistics tables included as extra sheets), and every chart
-as a **PNG** — rendered locally with `vl-convert`, so nothing leaves the machine.
+Results can be downloaded as **CSV** or **Excel** (statistics tables included as extra sheets), every chart
+as a **PNG** — rendered locally with `vl-convert`, so nothing leaves the machine — and the whole result as a
+**Power BI project** (table + the planned charts + the SQL) that opens in Power BI Desktop.
 
 ## 1. Install
 
@@ -121,6 +123,28 @@ Interpretation → Caveats**. It cannot compute anything, only restate the facts
 specs (type, x, y, colour, aggregate); every spec is validated against the actual columns and drawn with Altair
 (tooltips included). If the model proposes nothing usable, a deterministic heuristic picks the chart. Toggle
 *Draw charts* in the sidebar; `MAX_CHARTS` caps the number per answer.
+
+### Power BI export (`agent/powerbi.py`)
+*Download Power BI* next to the CSV/Excel buttons writes a **Power BI Project** (`<question>-powerbi.zip`, a
+`.pbip` folder). Unzip it and open the `.pbip` in Power BI Desktop: page *Overview* has the question, the answer,
+a row-count card and one Power BI visual per chart the answer agent planned (bar → column/bar chart, line → line
+chart, scatter → scatter chart, histogram → column chart over a DAX bin column, box → mean/min/max columns);
+page *Data* has the SQL and the full table. Statistics tables become extra tables in the model.
+
+`.pbix` is a binary format only Power BI Desktop can write, so the agent generates the documented text formats
+instead: a **TMDL** semantic model and a **PBIR** report, straight from the result and the chart specs.
+On older Desktop versions enable *Options → Preview features → Power BI Project (.pbip)* and *Store reports using
+enhanced metadata format (PBIR)*.
+
+The sidebar choice **Power BI data source** decides where the rows come from:
+
+| Mode | What the file contains | Refresh in Power BI |
+|---|---|---|
+| **Live MySQL query** (default, `POWERBI_SOURCE=live`) | The generated SQL as the table's M query: `MySQL.Database(host:port, db, [Query=...])`. Host, port and database name only — **the password is never written**. | Yes. Power BI asks for credentials on first refresh: use the read-only `agent_ro` user. Needs [MySQL Connector/NET](https://dev.mysql.com/downloads/connector/net/) on the Power BI machine. |
+| **Embedded rows** (`POWERBI_SOURCE=inline`) | The rows as a DAX `DATATABLE`, capped at `POWERBI_INLINE_MAX_ROWS` (default 5 000). Nothing to install, works offline. | No: a snapshot. |
+
+ML answers are always embedded, because the predictions, clusters and anomaly scores exist only in the agent, not
+in MySQL.
 
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),
