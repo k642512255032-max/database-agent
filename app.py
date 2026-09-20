@@ -10,13 +10,12 @@ import streamlit as st
 
 from agent.answer_agent import AnswerAgent
 from agent.config import settings
-from agent.db import Database
 from agent.export import EXCEL_MAX_ROWS, chart_to_png, export_filenames, to_csv_bytes, to_xlsx_bytes
 from agent.powerbi import to_pbip_bytes
 from agent.llm import OllamaLLM
-from agent.orchestrator import AgentResult, DataAgent
+from agent.orchestrator import AgentResult
 from agent.trace import Step
-from ml.registry import ModelRegistry
+from ui_shared import get_agent
 
 st.set_page_config(page_title="Local Data Agent", page_icon="🔎", layout="wide",
                    initial_sidebar_state="expanded")
@@ -173,11 +172,6 @@ def tags(values: list, limit: int = 24) -> str:
     if len(values) > limit:
         shown.append(f'<span class="kv"><i>+{len(values) - limit} more</i></span>')
     return f'<div class="kv-row">{"".join(shown)}</div>'
-
-
-@st.cache_resource(show_spinner=False)
-def get_agent(db_url: str, model: str) -> DataAgent:
-    return DataAgent(db=Database(db_url), llm=OllamaLLM(model=model), registry=ModelRegistry())
 
 
 # ------------------------------------------------------------------ sidebar

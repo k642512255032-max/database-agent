@@ -7,3 +7,4 @@ models/manifest.json
 .pytest_cache/
 *.bak
 body2.txt
+dashboards/
