@@ -74,5 +74,11 @@ class Settings:
     powerbi_source: str = os.getenv("POWERBI_SOURCE", "live")
     powerbi_inline_max_rows: int = int(os.getenv("POWERBI_INLINE_MAX_ROWS", "5000"))
 
+    # --- Dashboards --------------------------------------------------------
+    netlify_token: str = os.getenv("NETLIFY_AUTH_TOKEN", "")          # personal access token; empty = publishing disabled
+    dashboard_max_widgets: int = int(os.getenv("DASHBOARD_MAX_WIDGETS", "8"))
+    dashboard_rows_per_widget: int = int(os.getenv("DASHBOARD_ROWS_PER_WIDGET", "500"))   # LIMIT for widget SQL and table rows
+    dashboards_dir: Path = Path(os.getenv("DASHBOARDS_DIR", str(ROOT / "dashboards")))
+
 
 settings = Settings()

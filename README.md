@@ -32,6 +32,10 @@ Results can be downloaded as **CSV** or **Excel** (statistics tables included as
 as a **PNG** — rendered locally with `vl-convert`, so nothing leaves the machine — and the whole result as a
 **Power BI project** (table + the planned charts + the SQL) that opens in Power BI Desktop.
 
+A second page, **Dashboards**, turns a plain-English description into a hosted web dashboard: the agent designs the
+widgets, writes and runs the SQL, generates the HTML / CSS / JavaScript, previews it, and on your approval publishes
+it to Netlify.
+
 ## 1. Install
 
 Requirements: Python 3.10+, [Ollama](https://ollama.com), and MySQL 8 (or MariaDB).
@@ -146,6 +150,31 @@ The sidebar choice **Power BI data source** decides where the rows come from:
 ML answers are always embedded, because the predictions, clusters and anomaly scores exist only in the agent, not
 in MySQL.
 
+### Dashboards: describe → preview → publish (`dashboard/`, `pages/1_Dashboards.py`)
+Open **Dashboards** in the sidebar navigation and describe what you want, e.g. *"Sales overview: total revenue KPI,
+revenue by month (line), top 10 cities by revenue (bar), orders by status (pie), latest 20 orders (table)"*. Then:
+
+1. **Design** - the answer model turns the description into a validated *dashboard spec*: 3-8 widgets, each with a
+   kind (`kpi`, `bar`, `line`, `pie`, `table`), a grid width and a **standalone data question**.
+2. **Build** - every widget's question goes through the normal pipeline (`DataAgent.ask`, data-query mode): schema
+   linking, SQL generation, validation, execution. Each step is shown live; a widget whose SQL fails becomes an error
+   card, the rest of the dashboard still builds.
+3. **Preview** - the generated `index.html`, `style.css`, `app.js` and `data.js` (plus a vendored Chart.js) are
+   rendered in the page. You can read the files, see every widget's SQL and row count, download the zip, or type a
+   change request (*"make revenue by month a bar chart"*): only widgets whose question changed are re-queried.
+4. **Publish** - after an explicit consent checkbox, the bundle is zip-deployed to **Netlify** and you get a public
+   URL. *My dashboards* lists what you published: **Refresh** re-runs the stored SQL (no LLM) and republishes to the
+   same URL; **Unpublish** deletes the site.
+
+The LLM never writes HTML/CSS/JS - it produces the spec, Python renders the files from templates, so a 3B-7B local
+model cannot produce a broken page. The published site is a **data snapshot**: it never connects to your database
+and nothing on it is live. Everything on it is public to anyone with the link, so publish only what you are happy
+to share.
+
+Setup: create a Netlify personal access token (*User settings → Applications*) and put it in `.env` as
+`NETLIFY_AUTH_TOKEN`. Without it the page still designs, builds and previews; only *Publish* is disabled.
+Caps: `DASHBOARD_MAX_WIDGETS` (8) and `DASHBOARD_ROWS_PER_WIDGET` (500). Records live in `dashboards/*.json`.
+
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),
 `anova`, `chi_square` (+ Cramér's V), `normality` (Shapiro-Wilk), `linear_regression` (OLS),
@@ -194,6 +223,9 @@ prediction changes. It works the same way for every supervised model.
 | `MAX_ROWS`, `MAX_SQL_RETRIES`, `MAX_TABLES_IN_PROMPT` | 1000, 3, 6 |
 | `LLM_NUM_CTX`, `LLM_TEMPERATURE` | 8192, 0 |
 | `MODELS_DIR` | `./models` |
+| `POWERBI_SOURCE`, `POWERBI_INLINE_MAX_ROWS` | `live`, 5000 |
+| `NETLIFY_AUTH_TOKEN` | *(empty = dashboard publishing off)* |
+| `DASHBOARD_MAX_WIDGETS`, `DASHBOARD_ROWS_PER_WIDGET`, `DASHBOARDS_DIR` | 8, 500, `./dashboards` |
 
 ## 7. Tests
 ```bash
@@ -203,16 +235,20 @@ Tests cover the SQL guard, the read-only session, SQL self-repair, t-test and re
 
 ## Project layout
 ```
-app.py                  Streamlit UI
+app.py                  Streamlit UI (chat)     ui_shared.py  cached agent shared by the pages
+pages/1_Dashboards.py   Dashboards page: describe -> build -> preview -> publish
+dashboard/  spec.py  prompts.py  builder.py (design + fetch + render)  render.py (HTML/CSS/JS bundle)
+            netlify.py (zip deploy)  store.py (dashboards/*.json)  assets/chart.umd.js (vendored Chart.js)
 train_models.py         one-off training → models/*.joblib + manifest.json
 training_config.yaml    which models to train, on which SQL
 agent/  config.py  db.py (schema, linking, SQL guard)  llm.py (Ollama JSON-schema output)
         prompts.py  orchestrator.py (the pipeline)  answer_agent.py (explanations + chart plans)
         request_agent.py (request standardiser)  context.py (conversation memory + context builder)
         stats_tools.py  trace.py (explainability)
+        export.py (CSV/Excel/PNG)  powerbi.py (.pbip project)
 ml/     features.py (auto FE)  registry.py (bundles)  inference.py (predict + explain)
 sample_data/seed_mysql.py   demo database
-tests/test_agent.py
+tests/  test_agent.py  test_export.py  test_powerbi.py  test_dashboard_*.py
 ```
 
 ## Tips for small models
