@@ -20,6 +20,7 @@ The LLM is a lightweight **Qwen2.5-Coder** model served by **Ollama**. Nothing l
  5 Execute SQL ──────────────▶ read-only MySQL session; on error the LLM repairs it (≤3 tries)
  6 Load model → Feature engineering → Inference → Explanations
  7 Answer agent ── 2nd LLM ─▶ answer / key findings / interpretation / caveats, built only from computed facts
+ 7b Expert AI ──── 3rd LLM ─▶ (optional) data-quality verdict, expert insights, advice - a specialist beside the answer agent
  8 Chart planner ─ 2nd LLM ─▶ chart spec (bar, line, scatter, histogram, box) validated against the real columns
  9 Context builder ─ 2nd LLM ─▶ updates the conversation memory (entities, filters, preferences, facts found)
 ```
@@ -175,6 +176,32 @@ Setup: create a Netlify personal access token (*User settings → Applications*)
 `NETLIFY_AUTH_TOKEN`. Without it the page still designs, builds and previews; only *Publish* is disabled.
 Caps: `DASHBOARD_MAX_WIDGETS` (8) and `DASHBOARD_ROWS_PER_WIDGET` (500). Records live in `dashboards/*.json`.
 
+### Expert AI: a specialist beside the answer agent (`agent/expert_agent.py`, `agent/data_quality.py`, `pages/2_Expert_audit.py`)
+The answer agent explains *what* the numbers say. The **Expert AI** judges *whether they can be trusted* and *what an
+expert would do*. It is built like the answer agent (own Ollama model, JSON output, one trace step, never fatal) but
+has **specialised prompts per task**:
+
+| Task | When | Focus |
+|---|---|---|
+| Data-query review | plain SQL answers | completeness, suspicious values (negatives, outliers, future / sentinel dates), whether the rows answer the question or hide detail, which breakdown to add |
+| Statistics review | t-test, ANOVA, regression... | test fit, sample size per group, effect size vs significance, assumptions, what to run next |
+| ML review | predictions, clusters, anomalies | metrics vs trust, class balance, leakage risk, uncertain predictions, plausibility of explanations, how to validate |
+| Table audit | *Expert audit* page | a whole table or view: structure, per-column statistics, findings with severity, report with impact / fix / recommendations |
+
+Every number the expert may cite is computed by tools first (`agent/data_quality.py`): missing values, duplicates,
+constant columns, IQR outliers, negatives in amount-like columns, future dates, blank strings, case variants; for whole
+tables also distinct counts, ranges, orphan foreign keys, duplicate rows and open-ended sentinel dates, with one
+bounded query (`MAX_EXECUTION_TIME`) per group of columns. The model only judges, prioritises and advises - which is
+what makes a small local model usable here. The deterministic findings are always shown next to the report.
+
+* **In chat**: turn on *Expert review* in the sidebar; an *Expert review* card (verdict, quality score 1-5, data
+  issues, insights, advice, confidence) appears under each answer, and the trace shows exactly what the expert saw.
+* **Expert audit page**: pick a table, click *Audit table*, read the findings and the report, download it as Markdown.
+* **Persona**: the sidebar box *Domain & goals* (e.g. *"HR analytics; we care about pay equity and retention"*) is
+  injected into every expert prompt so the advice is business-specific. `EXPERT_PERSONA` sets the default.
+* **Model**: `OLLAMA_EXPERT_MODEL` (empty = the answer model). A larger instruct model such as `qwen2.5:14b-instruct`
+  gives noticeably better judgement; nothing is fine-tuned.
+
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),
 `anova`, `chi_square` (+ Cramér's V), `normality` (Shapiro-Wilk), `linear_regression` (OLS),
@@ -226,6 +253,8 @@ prediction changes. It works the same way for every supervised model.
 | `POWERBI_SOURCE`, `POWERBI_INLINE_MAX_ROWS` | `live`, 5000 |
 | `NETLIFY_AUTH_TOKEN` | *(empty = dashboard publishing off)* |
 | `DASHBOARD_MAX_WIDGETS`, `DASHBOARD_ROWS_PER_WIDGET`, `DASHBOARDS_DIR` | 8, 500, `./dashboards` |
+| `OLLAMA_EXPERT_MODEL`, `EXPERT_PERSONA`, `EXPERT_REVIEWS` | *(answer model)*, *(empty)*, 1 |
+| `EXPERT_AUDIT_TIMEOUT_MS`, `EXPERT_AUDIT_SAMPLE_ROWS` | 20000, 500 |
 
 ## 7. Tests
 ```bash
@@ -237,6 +266,7 @@ Tests cover the SQL guard, the read-only session, SQL self-repair, t-test and re
 ```
 app.py                  Streamlit UI (chat)     ui_shared.py  cached agent shared by the pages
 pages/1_Dashboards.py   Dashboards page: describe -> build -> preview -> publish
+pages/2_Expert_audit.py Expert audit page: profile a table -> findings -> expert report
 dashboard/  spec.py  prompts.py  builder.py (design + fetch + render)  render.py (HTML/CSS/JS bundle)
             netlify.py (zip deploy)  store.py (dashboards/*.json)  assets/chart.umd.js (vendored Chart.js)
 train_models.py         one-off training → models/*.joblib + manifest.json
@@ -246,9 +276,10 @@ agent/  config.py  db.py (schema, linking, SQL guard)  llm.py (Ollama JSON-schem
         request_agent.py (request standardiser)  context.py (conversation memory + context builder)
         stats_tools.py  trace.py (explainability)
         export.py (CSV/Excel/PNG)  powerbi.py (.pbip project)
+        expert_agent.py (Expert AI: reviews + table audit)  data_quality.py (quality toolkit + audit SQL)
 ml/     features.py (auto FE)  registry.py (bundles)  inference.py (predict + explain)
 sample_data/seed_mysql.py   demo database
-tests/  test_agent.py  test_export.py  test_powerbi.py  test_dashboard_*.py
+tests/  test_agent.py  test_export.py  test_powerbi.py  test_dashboard_*.py  test_data_quality.py  test_expert_*.py
 ```
 
 ## Tips for small models

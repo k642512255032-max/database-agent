@@ -12,6 +12,7 @@ Pipeline (every box is a recorded, visible Step):
   6a statistics:  choose method -> run test -> interpretation
   6b ML:          check columns -> feature engineering -> inference -> explanations
   7 Write answer              (LLM summary grounded in computed facts)
+  7b Expert review (optional) (expert_agent.py: data-quality verdict, insights, advice - a specialist beside the answer agent)
   8 Update conversation context (context.py: entities, filters, preferences, facts for the next turn)
 """
 from __future__ import annotations
@@ -32,6 +33,7 @@ from .answer_agent import AnswerAgent
 from .config import settings
 from .context import ContextBuilder, ConversationContext
 from .db import Database, UnsafeSQLError
+from .expert_agent import ExpertAgent
 from .llm import OllamaLLM
 from .request_agent import RequestStandardizer, StandardRequest, previous_turn_text
 from .trace import Step, Trace
@@ -55,6 +57,7 @@ class AgentResult:
     model_name: Optional[str] = None
     answer: str = ""
     charts: list[dict] = field(default_factory=list)   # chart specs planned by the answer agent
+    expert: Optional[dict] = None               # expert agent review (task, verdict, issues, insights, advice)
     error: Optional[str] = None
     extras: dict = field(default_factory=dict)
 
@@ -73,7 +76,8 @@ class DataAgent:
     def __init__(self, db: Database | None = None, llm: Any | None = None,
                  registry: ModelRegistry | None = None, answer_agent: AnswerAgent | None = None,
                  charts: bool = True, summarise_data: bool | None = None,
-                 standardizer: RequestStandardizer | None = None, context_builder: ContextBuilder | None = None):
+                 standardizer: RequestStandardizer | None = None, context_builder: ContextBuilder | None = None,
+                 expert_agent: ExpertAgent | None = None, expert: bool = False):
         self.db = db or Database()
         self.llm = llm or OllamaLLM()
         self.registry = registry or ModelRegistry()
@@ -82,6 +86,9 @@ class DataAgent:
         # step 0: the standardiser shares the SQL model; step 8: the context builder shares the answer model
         self.standardizer = standardizer or RequestStandardizer(self.llm)
         self.context_builder = context_builder or ContextBuilder(self.answer_agent.llm)
+        # step 7b: the expert agent shares the answer model unless OLLAMA_EXPERT_MODEL names a stronger one
+        self.expert_agent = expert_agent or ExpertAgent(self.answer_agent.llm if not settings.expert_model else None)
+        self.expert = expert
         self.charts = charts
         # plain-English summary for data queries; costs one answer-model call per query
         self.summarise_data = settings.summarise_data_queries if summarise_data is None else summarise_data
@@ -111,6 +118,7 @@ class DataAgent:
             elif res.intent == "machine_learning":
                 self._machine_learning(res)
             self._answer(res)
+            self._expert(res)
         except Exception as exc:
             res.error = f"{type(exc).__name__}: {exc}"
             res.answer = f"I could not complete this request: {exc}"
@@ -349,6 +357,12 @@ class DataAgent:
             res.answer = self.answer_agent.compose(res, res.trace)
         if self.charts:
             res.charts = self.answer_agent.plan_charts(res, res.trace, res.frame())
+
+
+    # ====================================================== 7b. expert review
+    def _expert(self, res: AgentResult) -> None:
+        if self.expert and res.data is not None:
+            res.expert = self.expert_agent.review(res, res.trace)
 
 
 # ---------------------------------------------------------------- helpers

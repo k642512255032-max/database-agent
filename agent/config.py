@@ -80,5 +80,14 @@ class Settings:
     dashboard_rows_per_widget: int = int(os.getenv("DASHBOARD_ROWS_PER_WIDGET", "500"))   # LIMIT for widget SQL and table rows
     dashboards_dir: Path = Path(os.getenv("DASHBOARDS_DIR", str(ROOT / "dashboards")))
 
+    # --- Expert AI ---------------------------------------------------------
+    # A specialist agent beside the answer agent: judges data quality, gives insights and advice.
+    # Empty model = same as OLLAMA_ANSWER_MODEL (then OLLAMA_MODEL). A 14B instruct model gives noticeably better advice.
+    expert_model: str = os.getenv("OLLAMA_EXPERT_MODEL", "")
+    expert_persona: str = os.getenv("EXPERT_PERSONA", "")          # "Domain & goals" text, editable in the sidebar
+    expert_reviews: bool = os.getenv("EXPERT_REVIEWS", "1") not in ("0", "false", "no", "")   # review every chat answer
+    expert_audit_timeout_ms: int = int(os.getenv("EXPERT_AUDIT_TIMEOUT_MS", "20000"))   # per audit query (MySQL hint)
+    expert_audit_sample_rows: int = int(os.getenv("EXPERT_AUDIT_SAMPLE_ROWS", "500"))    # rows fetched for sample checks
+
 
 settings = Settings()

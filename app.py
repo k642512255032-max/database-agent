@@ -10,12 +10,13 @@ import streamlit as st
 
 from agent.answer_agent import AnswerAgent
 from agent.config import settings
+from agent.expert_agent import ExpertAgent, review_markdown
 from agent.export import EXCEL_MAX_ROWS, chart_to_png, export_filenames, to_csv_bytes, to_xlsx_bytes
 from agent.powerbi import to_pbip_bytes
 from agent.llm import OllamaLLM
 from agent.orchestrator import AgentResult
 from agent.trace import Step
-from ui_shared import get_agent
+from ui_shared import expert_persona_input, get_agent
 
 st.set_page_config(page_title="Local Data Agent", page_icon="🔎", layout="wide",
                    initial_sidebar_state="expanded")
@@ -28,7 +29,7 @@ MODE_INTENT = {"Data query": "data_query", "Statistics": "statistics", "Machine 
 # how each trace detail is rendered
 CODE_KEYS = {"sql", "validated_sql", "schema_given_to_model", "facts_given_to_model",
              "context_given_to_model", "facts", "previous_error", "original_question",
-             "standalone_question", "turn_given_to_model", "updated_context"}
+             "standalone_question", "turn_given_to_model", "updated_context", "quality_report_given_to_model"}
 TAG_KEYS = {"selected_tables", "columns", "available_models", "explanations",
             "feature_names", "required_columns", "top_features",
             "entities", "filters", "metrics", "grouping", "ambiguities"}
@@ -39,6 +40,8 @@ LABELS = {"sql": "Generated SQL", "validated_sql": "Validated SQL (what actually
           "turn_given_to_model": "This turn, as sent to the model",
           "updated_context": "Updated conversation memory",
           "standalone_question": "Standardised request", "ambiguities": "Assumptions made",
+          "quality_report_given_to_model": "Material sent to the expert", "persona": "Expert persona",
+          "task": "Expert task", "verdict": "Verdict", "quality_score": "Quality score",
           "previous_error": "Error returned by the database", "plan": "Feature-engineering plan",
           "rows": "Rows", "rows_scored": "Rows scored", "raw_columns": "Raw columns",
           "model_features": "Model features"}
@@ -190,6 +193,14 @@ with st.sidebar:
     summary_on = st.toggle("Summarise data queries", value=settings.summarise_data_queries,
                            help="Add a short plain-English summary above the result table of plain data queries "
                                 "(one extra answer-model call per question).")
+    st.markdown('<div class="side-label">Expert AI</div>', unsafe_allow_html=True)
+    expert_on = st.toggle("Expert review", value=settings.expert_reviews,
+                          help="A specialist model reviews each answer alongside the answer agent: data quality, "
+                               "expert insights and advice (one extra model call per question).")
+    expert_model = st.text_input("Expert model", settings.expert_model, label_visibility="collapsed",
+                                 placeholder="Expert model (empty = answer model)",
+                                 help="A stronger instruct model, e.g. qwen2.5:14b-instruct, gives better judgement.")
+    persona = expert_persona_input()
     pbi_source = st.radio("Power BI data source", ["Live MySQL query", "Embedded rows"],
                           index=0 if settings.powerbi_source == "live" else 1, horizontal=True,
                           help="Live: the .pbip runs the generated SQL against MySQL when refreshed (needs MySQL "
@@ -200,19 +211,24 @@ with st.sidebar:
     agent = get_agent(db_url, model)          # cached: keeps the introspected schema
     agent.answer_agent = AnswerAgent(OllamaLLM(model=answer_model or model))
     agent.context_builder.llm = agent.answer_agent.llm      # memory summaries are prose: use the answer model
+    agent.expert_agent = ExpertAgent(OllamaLLM(model=expert_model or answer_model or model), persona)
+    agent.expert = expert_on
     agent.charts = charts_on
     agent.summarise_data = summary_on
 
     ok_db, msg_db = agent.db.ping()
     ok_llm, msg_llm = agent.llm.health()
     ok_ans, msg_ans = agent.answer_agent.llm.health()
+    ok_exp, msg_exp = agent.expert_agent.llm.health() if expert_on else (True, "")
     st.markdown(
         chip("Database" if ok_db else "Database offline", "ok" if ok_db else "err")
         + chip(f"SQL · {model}" if ok_llm else "Ollama offline", "ok" if ok_llm else "err")
         + chip(f"Answer · {agent.answer_agent.llm.model}" if ok_ans else "Answer model missing",
-               "ok" if ok_ans else "err"),
+               "ok" if ok_ans else "err")
+        + (chip(f"Expert · {agent.expert_agent.llm.model}" if ok_exp else "Expert model missing",
+                "ok" if ok_exp else "err") if expert_on else ""),
         unsafe_allow_html=True)
-    for ok, msg in ((ok_db, msg_db), (ok_llm, msg_llm), (ok_ans, msg_ans)):
+    for ok, msg in ((ok_db, msg_db), (ok_llm, msg_llm), (ok_ans, msg_ans), (ok_exp, msg_exp)):
         if not ok:
             st.markdown(f'<p class="side-note">{esc(msg)}</p>', unsafe_allow_html=True)
 
@@ -532,6 +548,15 @@ def render_result(r: AgentResult) -> None:
         else:
             st.markdown(r.answer)
             render_charts(r)
+    if r.expert:
+        score = r.expert["quality_score"]
+        with st.container(border=True):
+            st.markdown(f'<div class="answer-meta">{chip("Expert review", "brand")}'
+                        f'{chip(INTENT_LABEL.get(r.expert["task"], r.expert["task"]), dot=False)}'
+                        f'{chip(r.expert["model"], dot=False)}'
+                        f'{chip(f"quality {score}/5", "ok" if score >= 4 else "warn" if score == 3 else "err")}</div>',
+                        unsafe_allow_html=True)
+            st.markdown(review_markdown(r.expert))
 
     n_rows = len(r.data) if r.data is not None else 0
     tabs = st.tabs([f"Step-by-step ({len(r.trace.steps)})", f"Data ({n_rows:,})", "Analysis", "SQL"])
