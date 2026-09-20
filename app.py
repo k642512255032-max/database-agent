@@ -188,9 +188,13 @@ with st.sidebar:
                                  help="Explains results and plans charts. A general instruct model "
                                       "(e.g. qwen2.5:7b-instruct) writes better prose than a coder model.")
     charts_on = st.toggle("Draw charts", value=True, help="Let the answer agent plan and draw charts.")
+    summary_on = st.toggle("Summarise data queries", value=settings.summarise_data_queries,
+                           help="Add a short plain-English summary above the result table of plain data queries "
+                                "(one extra answer-model call per question).")
     agent = get_agent(db_url, model)          # cached: keeps the introspected schema
     agent.answer_agent = AnswerAgent(OllamaLLM(model=answer_model or model))
     agent.charts = charts_on
+    agent.summarise_data = summary_on
 
     ok_db, msg_db = agent.db.ping()
     ok_llm, msg_llm = agent.llm.health()
@@ -466,7 +470,9 @@ def render_result(r: AgentResult) -> None:
         if r.error:
             st.error(r.answer)
         elif r.intent == "data_query":
-            # 1. the SQL that ran, 2. the result table - nothing else
+            # optional plain-English summary, then 1. the SQL that ran, 2. the result table
+            if r.extras.get("summarised"):
+                st.markdown(r.answer)
             st.code(r.sql or "-- no SQL was generated", language="sql", wrap_lines=True)
             if r.data is None or r.data.empty:
                 st.caption("The query returned no rows.")

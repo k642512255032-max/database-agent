@@ -69,13 +69,15 @@ class AgentResult:
 class DataAgent:
     def __init__(self, db: Database | None = None, llm: Any | None = None,
                  registry: ModelRegistry | None = None, answer_agent: AnswerAgent | None = None,
-                 charts: bool = True):
+                 charts: bool = True, summarise_data: bool | None = None):
         self.db = db or Database()
         self.llm = llm or OllamaLLM()
         self.registry = registry or ModelRegistry()
         # the answer agent defaults to the same LLM in tests / when no separate model is configured
         self.answer_agent = answer_agent or AnswerAgent(llm if llm is not None and not settings.answer_model else None)
         self.charts = charts
+        # plain-English summary for data queries; costs one answer-model call per query
+        self.summarise_data = settings.summarise_data_queries if summarise_data is None else summarise_data
 
     # ================================================================ public
     def ask(self, question: str, on_step: Callable[[Step], None] | None = None,
@@ -336,11 +338,15 @@ class DataAgent:
     # ============================================================= 7. answer
     def _answer(self, res: AgentResult) -> None:
         if res.intent == "data_query":
-            # Plain data requests: the SQL and the result table *are* the answer - no LLM prose.
-            with res.trace.step("Write the answer", "Return the SQL and the result table directly.") as s:
-                n = len(res.data) if res.data is not None else 0
-                res.answer = f"{n:,} row{'s' if n != 1 else ''} returned."
-                s.add(decision="Data query - the SQL and its result table are shown as-is, without an LLM summary.")
+            n = len(res.data) if res.data is not None else 0
+            if self.summarise_data and n > 0:
+                # the SQL and table are still shown; the answer model adds a short plain-English summary on top
+                res.answer = self.answer_agent.compose(res, res.trace, brief=True)
+                res.extras["summarised"] = True
+            else:
+                with res.trace.step("Write the answer", "Return the SQL and the result table directly.") as s:
+                    res.answer = f"{n:,} row{'s' if n != 1 else ''} returned."
+                    s.add(decision="Data query - the SQL and its result table are shown as-is, without an LLM summary.")
         else:
             res.answer = self.answer_agent.compose(res, res.trace)
         if self.charts:
