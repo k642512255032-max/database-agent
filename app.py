@@ -11,6 +11,7 @@ import streamlit as st
 from agent.answer_agent import AnswerAgent
 from agent.config import settings
 from agent.db import Database
+from agent.export import EXCEL_MAX_ROWS, chart_to_png, export_filenames, to_csv_bytes, to_xlsx_bytes
 from agent.llm import OllamaLLM
 from agent.orchestrator import AgentResult, DataAgent
 from agent.trace import Step
@@ -270,6 +271,37 @@ def render_value(key: str, value) -> None:
                     unsafe_allow_html=True)
 
 
+def export_row(r: AgentResult, data: pd.DataFrame, where: str) -> None:
+    """CSV / Excel download buttons for a result table. `where` keeps widget keys unique per placement."""
+    if data is None or data.empty:
+        return
+    names = export_filenames(r.standalone_question or r.question)
+    extra_sheets = None
+    if r.stats:
+        extra_sheets = {k: v if isinstance(v, pd.DataFrame) else pd.DataFrame(v)
+                        for k, v in r.stats["tables"].items()}
+    cache = r.extras.setdefault("_export", {})    # results persist in session_state: build each file once
+    c1, c2, _ = st.columns([1, 1, 4])
+    if "csv" not in cache:
+        cache["csv"] = to_csv_bytes(data)
+    c1.download_button("Download CSV", cache["csv"], file_name=names["csv"], mime="text/csv",
+                       key=f"csv_{where}_{id(r)}")
+    if "xlsx" not in cache:
+        try:
+            cache["xlsx"] = to_xlsx_bytes(data, extra_sheets=extra_sheets)
+        except Exception as exc:   # a failing export must never break the page
+            cache["xlsx"] = (None, str(exc))
+    xlsx, truncated = cache["xlsx"]
+    if xlsx is None:
+        st.caption(f"Excel export unavailable: {truncated}")
+        return
+    c2.download_button("Download Excel", xlsx, file_name=names["xlsx"],
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key=f"xlsx_{where}_{id(r)}")
+    if truncated:
+        st.caption(f"Excel sheet limited to {EXCEL_MAX_ROWS:,} rows")
+
+
 def render_step(s: Step) -> None:
     tone = TONE.get(s.status, "")
     with st.container(border=True):
@@ -305,7 +337,7 @@ def _axis_title(col: str, agg: str) -> str:
     return f"{agg} of {col}" if agg not in ("none", "") else col
 
 
-def render_chart(spec: dict, df: pd.DataFrame) -> None:
+def render_chart(spec: dict, df: pd.DataFrame, key: str, fname: str) -> None:
     """Draw one validated chart spec (from the answer agent) with Altair."""
     t, x = spec["type"], spec["x"]
     y, color, agg = spec.get("y") or None, spec.get("color") or None, spec.get("aggregate", "none")
@@ -378,6 +410,11 @@ def render_chart(spec: dict, df: pd.DataFrame) -> None:
     chart = chart.configure_view(strokeWidth=0).configure_axis(gridColor="#e5e9f0", domainColor="#cbd5e1")
     st.markdown(f'<span class="field-label">{esc(spec.get("title") or t)}</span>', unsafe_allow_html=True)
     st.altair_chart(chart, width="stretch")
+    png, reason = chart_to_png(chart)
+    if png:
+        st.download_button("Download PNG", png, file_name=fname, mime="image/png", key=key)
+    else:
+        st.caption(reason)
     if spec.get("why"):
         st.caption(spec["why"])
 
@@ -386,9 +423,10 @@ def render_charts(r: AgentResult) -> None:
     df = r.frame()
     if df is None or not r.charts:
         return
-    for spec in r.charts:
+    names = export_filenames(r.standalone_question or r.question)
+    for i, spec in enumerate(r.charts):
         try:
-            render_chart(spec, df)
+            render_chart(spec, df, key=f"png_{id(r)}_{i}", fname=names["png"].format(i=i + 1))
         except Exception as exc:   # a bad spec must never break the page
             st.caption(f"Could not draw {spec.get('type')} chart: {exc}")
 
@@ -434,8 +472,7 @@ def render_result(r: AgentResult) -> None:
                 st.caption("The query returned no rows.")
             else:
                 st.dataframe(r.data, width="stretch", hide_index=True)
-                st.download_button("Download CSV", r.data.to_csv(index=False), file_name="result.csv",
-                                   mime="text/csv", key=f"csv_card_{id(r)}")
+                export_row(r, r.frame(), where="card")
             render_charts(r)
         else:
             st.markdown(r.answer)
@@ -457,8 +494,7 @@ def render_result(r: AgentResult) -> None:
                         f'<span class="kv"><i>columns</i><b>{len(data.columns)}</b></span></div>',
                         unsafe_allow_html=True)
             st.dataframe(data, width="stretch", hide_index=True)
-            st.download_button("Download CSV", data.to_csv(index=False), file_name="result.csv",
-                               key=f"csv_{id(r)}")
+            export_row(r, data, where="tab")
     with tabs[2]:
         if r.stats:
             st.markdown(f"##### Statistical model — {r.stats['method']}")

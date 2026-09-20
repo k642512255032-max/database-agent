@@ -25,6 +25,9 @@ Two models do two jobs: a **coder** model writes SQL (`OLLAMA_MODEL`), a **gener
 results and plans the charts (`OLLAMA_ANSWER_MODEL`, e.g. `qwen2.5:7b-instruct`). Plain data queries skip the
 prose and show the SQL and the result table directly.
 
+Results can be downloaded as **CSV** or **Excel** (statistics tables included as extra sheets), and every chart
+as a **PNG** — rendered locally with `vl-convert`, so nothing leaves the machine.
+
 ## 1. Install
 
 Requirements: Python 3.10+, [Ollama](https://ollama.com), and MySQL 8 (or MariaDB).
