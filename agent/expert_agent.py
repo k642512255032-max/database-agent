@@ -2,8 +2,9 @@
 
 The answer agent explains what the numbers say. The expert agent judges whether the data and the
 analysis can be trusted, adds the insights a domain expert would notice, and gives concrete advice.
-It has one task-specific prompt per kind of result:
+It has one task-specific prompt per kind of result, plus a planning task that runs BEFORE the SQL:
 
+  * plan              (briefed) decide which tables / columns / filters answer the request; write the order for SQL
   * data_query        completeness, suspicious values, whether the rows really answer the question
   * statistics        test fit, sample size, effect size vs significance, assumptions
   * machine_learning  metrics vs trust, class balance, leakage, plausibility of explanations
@@ -39,10 +40,11 @@ CONFIDENCE = ("low", "medium", "high")
 
 # ------------------------------------------------------------------ prompts (prefixes must stay unique, see tests)
 _COMMON = """You are the Expert AI: {persona}.
-You work alongside an answer-writing assistant. Your job is different: judge whether the data and the analysis can be
-trusted, add the insights an expert would notice, and give concrete advice. You get the question, the answer already
-given, a QUALITY REPORT computed by tools, and material about the analysis. Never invent numbers; cite only what is in
-the material. Do not repeat the answer. Be specific and practical; no generic platitudes."""
+You work alongside an answer-writing assistant that will write the final reply AFTER you. Your job: judge whether
+the data and the analysis can be trusted, give your own expert answer, add the insights an expert would notice, and
+give concrete advice. You get the question, the data plan you ordered, a QUALITY REPORT computed by tools, and material
+about the analysis. Never invent numbers; cite only what is in the material. Be specific and practical; no generic
+platitudes."""
 
 TASK_FOCUS = {
     "data_query": """This was a plain data query (a SQL result table). Focus on: completeness (missing values, blanks,
@@ -62,6 +64,8 @@ are plausible for the domain, and how to validate before acting on them.""",
 REVIEW_FORMAT = """Return JSON with:
 - verdict: one sentence - can this be trusted and used as is?
 - quality_score: integer 1 (unusable) .. 5 (clean and sufficient).
+- expert_answer: 2-4 sentences: your own answer to the question from this data, with the key numbers, or why it
+  cannot be answered from this data.
 - data_issues: 0-5 bullets, each naming one concrete problem from the quality report or the material; empty if none.
 - insights: 2-4 bullets a domain expert would notice (patterns, surprises, what is missing to conclude).
 - advice: 2-4 bullets of concrete next actions (what to check, which breakdown or filter to add, what to decide).
@@ -72,12 +76,13 @@ REVIEW_SCHEMA = {
     "properties": {
         "verdict": {"type": "string"},
         "quality_score": {"type": "integer"},
+        "expert_answer": {"type": "string"},
         "data_issues": {"type": "array", "items": {"type": "string"}},
         "insights": {"type": "array", "items": {"type": "string"}},
         "advice": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "string", "enum": list(CONFIDENCE)},
     },
-    "required": ["verdict", "quality_score", "data_issues", "insights", "advice", "confidence"],
+    "required": ["verdict", "quality_score", "expert_answer", "data_issues", "insights", "advice", "confidence"],
 }
 
 AUDIT_SYSTEM = """You audit a database table as the Expert AI: {persona}.
@@ -109,6 +114,125 @@ AUDIT_SCHEMA = {
 }
 
 
+PLAN_SYSTEM = """You are the Expert AI: {persona}. You decide WHAT DATA is needed to answer a question, before any
+SQL is written. You get a DATABASE BRIEFING (what the tables mean, their grain, keys, joins and pitfalls), the
+schema, the standardised request and its extracted details, and the analysis type (data query / statistics /
+machine learning). Return JSON with:
+- reasoning: one or two sentences on how the briefing shapes the plan.
+- tables: the tables or views to read, fewest possible, exact names from the schema.
+- columns: the columns to output, as table.column, exact names.
+- filters: conditions in plain words (e.g. "current rows only: salaries.to_date = '9999-01-01'").
+- grouping: what each output row represents when aggregating (e.g. ["department"]); [] for row-level output.
+- metrics: measures to compute (e.g. ["average salary", "number of employees"]).
+- one_row_per: what one output row is (e.g. "one row per department", "one row per employee").
+- sort / limit: as the request asks; "" / 0 if none.
+- order_for_sql: 2-5 sentences telling the SQL writer exactly what to build: which joins, which date filter,
+  which aggregation, what to avoid. Written as an instruction.
+- pitfalls: 1-3 traps for this specific question, taken from the briefing (e.g. history rows multiplying counts).
+For statistics, request one row per observation (not aggregated). For machine learning, the tables must include the
+model's feature view and the columns it needs (given). Use only names in the schema; never invent."""
+
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "tables": {"type": "array", "items": {"type": "string"}},
+        "columns": {"type": "array", "items": {"type": "string"}},
+        "filters": {"type": "array", "items": {"type": "string"}},
+        "grouping": {"type": "array", "items": {"type": "string"}},
+        "metrics": {"type": "array", "items": {"type": "string"}},
+        "one_row_per": {"type": "string"},
+        "sort": {"type": "string"},
+        "limit": {"type": "integer"},
+        "order_for_sql": {"type": "string"},
+        "pitfalls": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["reasoning", "tables", "columns", "filters", "grouping", "metrics", "one_row_per", "sort", "limit",
+                 "order_for_sql", "pitfalls"],
+}
+
+
+@dataclass
+class DataPlan:
+    """What the expert ordered for the SQL writer."""
+    tables: list[str]
+    columns: list[str] = field(default_factory=list)
+    filters: list[str] = field(default_factory=list)
+    grouping: list[str] = field(default_factory=list)
+    metrics: list[str] = field(default_factory=list)
+    one_row_per: str = ""
+    sort: str = ""
+    limit: int = 0
+    order_for_sql: str = ""
+    pitfalls: list[str] = field(default_factory=list)
+    reasoning: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def text(self) -> str:
+        """Compact description for the assessment prompt and the trace."""
+        lines = [self.order_for_sql.strip() or "(no order written)"]
+        if self.one_row_per:
+            lines.append(f"one row per: {self.one_row_per}")
+        if self.filters:
+            lines.append("filters: " + "; ".join(self.filters))
+        if self.pitfalls:
+            lines.append("pitfalls: " + "; ".join(self.pitfalls))
+        return "\n".join(lines)
+
+
+def plan_material(request: str, details: str, intent: str, schema_text: str, briefing: str, ml_note: str = "") -> str:
+    parts = [f"DATABASE BRIEFING:\n{briefing.strip() or '(none)'}", f"SCHEMA:\n{schema_text}",
+             f"Analysis type: {intent.replace('_', ' ')}." + (f"\n{ml_note}" if ml_note else ""),
+             f"Request: {request}" + (f"\n{details}" if details else "")]
+    return "\n\n".join(parts)
+
+
+def validate_plan(raw: dict, schema: dict) -> tuple[DataPlan | None, list[str]]:
+    """Keep only tables that exist (case-insensitive) and columns that exist in the kept tables ("t.c" or "c").
+    Returns (plan, notes about what was dropped); (None, notes) when no valid table remains."""
+    raw = raw or {}
+    canon = {name.lower(): name for name in schema}
+    notes: list[str] = []
+    tables: list[str] = []
+    for t in _str_list(raw.get("tables"), 12):
+        key = t.strip().strip("`").lower()
+        if key in canon and canon[key] not in tables:
+            tables.append(canon[key])
+        else:
+            notes.append(f"unknown table '{t}' dropped")
+    if not tables:
+        return None, notes or ["the expert named no table"]
+    known: dict[str, set[str]] = {t: {c.lower() for c in schema[t].column_names} for t in tables}
+    columns: list[str] = []
+    for c in _str_list(raw.get("columns"), 40):
+        col = c.strip().strip("`")
+        if "." in col:
+            t, name = col.rsplit(".", 1)
+            tk = canon.get(t.strip().lower())
+            ok = tk in known and name.strip().lower() in known[tk]
+            col = f"{tk}.{name.strip()}" if ok else col
+        else:
+            ok = any(col.lower() in cols for cols in known.values())
+        if ok:
+            if col not in columns:
+                columns.append(col)
+        else:
+            notes.append(f"unknown column '{c}' dropped")
+    try:
+        limit = max(0, int(raw.get("limit") or 0))
+    except (TypeError, ValueError):
+        limit = 0
+    plan = DataPlan(tables=tables, columns=columns, filters=_str_list(raw.get("filters"), 8),
+                    grouping=_str_list(raw.get("grouping"), 6), metrics=_str_list(raw.get("metrics"), 6),
+                    one_row_per=" ".join(str(raw.get("one_row_per") or "").split()),
+                    sort=" ".join(str(raw.get("sort") or "").split()), limit=limit,
+                    order_for_sql=" ".join(str(raw.get("order_for_sql") or "").split()),
+                    pitfalls=_str_list(raw.get("pitfalls"), 3), reasoning=str(raw.get("reasoning") or ""))
+    return plan, notes
+
+
 # ------------------------------------------------------------------ material
 def task_for(res: "AgentResult") -> str:
     if res.ml is not None:
@@ -121,9 +245,13 @@ def task_for(res: "AgentResult") -> str:
 def review_material(res: "AgentResult", task: str) -> str:
     df = res.frame()
     q = dq.frame_quality(df)
-    parts = [f"Question: {res.standalone_question or res.question}",
-             f"Answer given:\n{(res.answer or '(none)')[:1500]}",
-             "QUALITY REPORT:\n" + dq.quality_text(q, dq.findings_from_frame(q))]
+    parts = [f"Question: {res.standalone_question or res.question}"]
+    plan = getattr(res, "plan", None)
+    if plan is not None:
+        parts.append("EXPERT'S PLAN (what you ordered for the SQL writer):\n" + plan.text())
+    if res.sql:
+        parts.append(f"SQL that ran:\n{res.sql[:1200]}")
+    parts.append("QUALITY REPORT:\n" + dq.quality_text(q, dq.findings_from_frame(q)))
     if df is not None and len(df) >= settings.max_rows and task == "data_query":
         parts.append(f"Note: the row limit of {settings.max_rows:,} was reached - the table may be incomplete.")
     if task == "statistics" and res.stats:
@@ -161,6 +289,7 @@ def _clean_review(out: dict) -> dict:
     conf = str(out.get("confidence") or "medium").lower().strip()
     return {"verdict": " ".join(str(out.get("verdict") or "").split()) or "No verdict given.",
             "quality_score": _int_score(out.get("quality_score")),
+            "expert_answer": " ".join(str(out.get("expert_answer") or "").split()),
             "data_issues": _str_list(out.get("data_issues")), "insights": _str_list(out.get("insights")),
             "advice": _str_list(out.get("advice")), "confidence": conf if conf in CONFIDENCE else "medium"}
 
@@ -182,32 +311,72 @@ def _clean_audit(out: dict) -> dict:
 
 # ------------------------------------------------------------------ the agent
 class ExpertAgent:
-    def __init__(self, llm: Any | None = None, persona: str = ""):
+    def __init__(self, llm: Any | None = None, persona: str = "", briefing: str = ""):
         self.llm = llm or OllamaLLM(model=settings.expert_model or settings.answer_model or settings.model)
         self.persona = (persona or "").strip() or settings.expert_persona.strip() or DEFAULT_PERSONA
+        self.briefing = (briefing or "").strip()      # database briefing text (agent/briefing.py); set by the caller
+
+    def _briefed(self, system: str) -> str:
+        # concatenation, never str.format: the briefing is free text and may contain braces
+        return system + ("\n\nYou are briefed on the database:\n" + self.briefing if self.briefing else "")
 
     def system_prompt(self, task: str) -> str:
         focus = TASK_FOCUS.get(task, TASK_FOCUS["data_query"])
-        return _COMMON.format(persona=self.persona) + "\n\n" + focus + "\n\n" + REVIEW_FORMAT
+        return self._briefed(_COMMON.format(persona=self.persona)) + "\n\n" + focus + "\n\n" + REVIEW_FORMAT
 
-    def review(self, res: "AgentResult", trace: Trace) -> dict | None:
-        """Expert review of one chat result: {task, verdict, quality_score, data_issues, insights, advice, confidence,
-        model, persona} or None when the model failed (recorded as a warning step)."""
+    # ------------------------------------------------------------ plan (before SQL)
+    def plan(self, res: "AgentResult", trace: Trace, schema_text: str, schema: dict, ml_note: str = "") -> DataPlan | None:
+        """Decide which tables / columns / filters answer the request and write the order for the SQL writer.
+        Returns None (warning step) when the model fails or names no valid table."""
+        with trace.step("Expert data plan (expert agent)",
+                        "The briefed expert decides which tables, columns and filters answer the request and "
+                        "writes the order the SQL writer must follow.") as s:
+            req = getattr(res, "request", None)
+            details = req.details_text() if req is not None else ""
+            material = plan_material(res.standalone_question or res.question, details, res.intent, schema_text,
+                                     self.briefing, ml_note)
+            s.add(model=getattr(self.llm, "model", "?"), persona=self.persona,
+                  briefing_given_to_model=self.briefing or "(none)", schema_given_to_model=schema_text)
+            try:
+                out = self.llm.chat_json(PLAN_SYSTEM.format(persona=self.persona), material, PLAN_SCHEMA)
+                s.add_thinking(self.llm)
+                s.reasoning = out.get("reasoning")
+                plan, notes = validate_plan(out, schema)
+                if notes:
+                    s.add(dropped=notes)
+                if plan is None:
+                    s.status = "warning"
+                    s.add(note="The expert's plan named no known table; falling back to lexical table linking.")
+                    return None
+                s.add(plan=plan.to_dict())
+                return plan
+            except Exception as exc:
+                s.status = "warning"
+                s.add(note=f"Expert agent failed ({exc}); falling back to lexical table linking.")
+                return None
+
+    # ------------------------------------------------------------ assess (after the data)
+    def assess(self, res: "AgentResult", trace: Trace) -> dict | None:
+        """Expert assessment of the data before the answer is written: {task, verdict, quality_score, expert_answer,
+        data_issues, insights, advice, confidence, model, persona} or None when the model failed (warning step)."""
         task = task_for(res)
-        with trace.step("Expert review (expert agent)",
-                        f"A specialist model reviews the {task.replace('_', ' ')} result: data quality, expert "
-                        "insights and advice, in the persona set in the sidebar.") as s:
+        with trace.step("Expert assessment (expert agent)",
+                        f"The briefed expert judges the {task.replace('_', ' ')} result - data quality, its own "
+                        "answer, insights and advice - which the answer agent then builds on.") as s:
             material = review_material(res, task)
             s.add(model=getattr(self.llm, "model", "?"), task=task, persona=self.persona,
                   quality_report_given_to_model=material)
             try:
                 out = _clean_review(self.llm.chat_json(self.system_prompt(task), material, REVIEW_SCHEMA))
-                s.add(verdict=out["verdict"], quality_score=out["quality_score"])
+                s.add_thinking(self.llm)
+                s.add(verdict=out["verdict"], quality_score=out["quality_score"], expert_answer=out["expert_answer"])
                 return {**out, "task": task, "model": getattr(self.llm, "model", "?"), "persona": self.persona}
             except Exception as exc:
                 s.status = "warning"
-                s.add(note=f"Expert agent failed ({exc}); no expert review for this answer.")
+                s.add(note=f"Expert agent failed ({exc}); the answer is written from the facts alone.")
                 return None
+
+    review = assess     # backwards-compatible name
 
     def audit(self, sheet: str, table: str, trace: Trace) -> dict | None:
         with trace.step("Expert report (expert agent)",
@@ -215,8 +384,9 @@ class ExpertAgent:
                         "and fix, insights, recommendations, questions for the data owner.") as s:
             s.add(model=getattr(self.llm, "model", "?"), persona=self.persona, quality_report_given_to_model=sheet)
             try:
-                out = _clean_audit(self.llm.chat_json(AUDIT_SYSTEM.format(persona=self.persona),
+                out = _clean_audit(self.llm.chat_json(self._briefed(AUDIT_SYSTEM.format(persona=self.persona)),
                                                       f"AUDIT SHEET for table {table}:\n{sheet}", AUDIT_SCHEMA))
+                s.add_thinking(self.llm)
                 s.add(quality_score=out["quality_score"], issues=len(out["issues"]))
                 return {**out, "table": table, "model": getattr(self.llm, "model", "?"), "persona": self.persona}
             except Exception as exc:
@@ -232,6 +402,7 @@ def _bullets(title: str, items: list[str]) -> str | None:
 
 def review_markdown(out: dict) -> str:
     parts = [f"**Verdict** — {out.get('verdict', '').strip()}",
+             f"**Expert answer** — {out['expert_answer'].strip()}" if out.get("expert_answer") else None,
              _bullets("Data issues", out.get("data_issues") or []),
              _bullets("Insights", out.get("insights") or []),
              _bullets("Advice", out.get("advice") or []),

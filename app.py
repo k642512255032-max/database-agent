@@ -29,7 +29,8 @@ MODE_INTENT = {"Data query": "data_query", "Statistics": "statistics", "Machine 
 # how each trace detail is rendered
 CODE_KEYS = {"sql", "validated_sql", "schema_given_to_model", "facts_given_to_model",
              "context_given_to_model", "facts", "previous_error", "original_question",
-             "standalone_question", "turn_given_to_model", "updated_context", "quality_report_given_to_model"}
+             "standalone_question", "turn_given_to_model", "updated_context", "quality_report_given_to_model",
+             "briefing_given_to_model", "thinking"}
 TAG_KEYS = {"selected_tables", "columns", "available_models", "explanations",
             "feature_names", "required_columns", "top_features",
             "entities", "filters", "metrics", "grouping", "ambiguities"}
@@ -42,6 +43,8 @@ LABELS = {"sql": "Generated SQL", "validated_sql": "Validated SQL (what actually
           "standalone_question": "Standardised request", "ambiguities": "Assumptions made",
           "quality_report_given_to_model": "Material sent to the expert", "persona": "Expert persona",
           "task": "Expert task", "verdict": "Verdict", "quality_score": "Quality score",
+          "briefing_given_to_model": "Briefing sent to the expert", "expert_answer": "Expert answer",
+          "dropped": "Dropped by validation", "source": "Source", "thinking": "Model's thinking (reasoning model)",
           "previous_error": "Error returned by the database", "plan": "Feature-engineering plan",
           "rows": "Rows", "rows_scored": "Rows scored", "raw_columns": "Raw columns",
           "model_features": "Model features"}
@@ -194,9 +197,9 @@ with st.sidebar:
                            help="Add a short plain-English summary above the result table of plain data queries "
                                 "(one extra answer-model call per question).")
     st.markdown('<div class="side-label">Expert AI</div>', unsafe_allow_html=True)
-    expert_on = st.toggle("Expert review", value=settings.expert_reviews,
-                          help="A specialist model reviews each answer alongside the answer agent: data quality, "
-                               "expert insights and advice (one extra model call per question).")
+    expert_on = st.toggle("Expert AI", value=settings.expert_reviews,
+                          help="The briefed expert plans the data for the SQL writer and assesses the result before "
+                               "the answer is written (two extra model calls per question).")
     expert_model = st.text_input("Expert model", settings.expert_model, label_visibility="collapsed",
                                  placeholder="Expert model (empty = answer model)",
                                  help="A stronger instruct model, e.g. qwen2.5:14b-instruct, gives better judgement.")
@@ -211,8 +214,16 @@ with st.sidebar:
     agent = get_agent(db_url, model)          # cached: keeps the introspected schema
     agent.answer_agent = AnswerAgent(OllamaLLM(model=answer_model or model))
     agent.context_builder.llm = agent.answer_agent.llm      # memory summaries are prose: use the answer model
-    agent.expert_agent = ExpertAgent(OllamaLLM(model=expert_model or answer_model or model), persona)
+    agent.expert_agent = ExpertAgent(OllamaLLM(model=expert_model or answer_model or model), persona,
+                                     briefing=agent.briefing.text if expert_on else "")
     agent.expert = expert_on
+    if expert_on:
+        with st.expander(f"Database briefing · {agent.briefing.name} · {agent.briefing.source}"):
+            st.caption(str(agent.briefing.path) if agent.briefing.path else "auto-generated from the schema")
+            st.markdown(agent.briefing.text[:3000] + ("…" if len(agent.briefing.text) > 3000 else ""))
+            if st.button("Reload briefing"):
+                agent.reload_briefing()
+                st.rerun()
     agent.charts = charts_on
     agent.summarise_data = summary_on
 

@@ -52,6 +52,10 @@ class Settings:
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0"))
     num_ctx: int = int(os.getenv("LLM_NUM_CTX", "8192"))
     llm_timeout_s: int = int(os.getenv("LLM_TIMEOUT_S", "180"))
+    # Thinking (reasoning) models: Ollama runs their reasoning first ("think": true), so they need more time.
+    # Model names matching this regex get thinking switched on and the longer timeout.
+    thinking_models: str = os.getenv("OLLAMA_THINKING_MODELS", r"qwen3|deepseek-r1|gpt-oss|magistral|phi4-reasoning")
+    llm_think_timeout_s: int = int(os.getenv("LLM_THINK_TIMEOUT_S", "900"))
     # Separate model for the answer agent (explanations + chart planning). Empty = same as OLLAMA_MODEL.
     # A general instruct model (e.g. qwen2.5:7b-instruct) writes far better prose than a coder model.
     answer_model: str = os.getenv("OLLAMA_ANSWER_MODEL", "")

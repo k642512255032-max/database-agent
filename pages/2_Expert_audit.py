@@ -10,6 +10,7 @@ import html
 import pandas as pd
 import streamlit as st
 
+from agent.briefing import load_briefing
 from agent.config import settings
 from agent.expert_agent import AuditResult, ExpertAgent, audit_markdown, run_audit
 from agent.export import slugify
@@ -86,7 +87,8 @@ with st.sidebar:
     agent = get_agent(db_url, model)
     st.markdown('<div class="side-label">Expert AI</div>', unsafe_allow_html=True)
     persona = expert_persona_input()
-    expert = ExpertAgent(OllamaLLM(model=expert_model or settings.answer_model or model), persona)
+    expert = ExpertAgent(OllamaLLM(model=expert_model or settings.answer_model or model), persona,
+                         briefing=load_briefing(agent.db).text)
 
     ok_db, msg_db = agent.db.ping()
     ok_exp, msg_exp = expert.llm.health()

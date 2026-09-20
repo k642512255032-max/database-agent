@@ -18,7 +18,8 @@ from agent.orchestrator import AgentResult, DataAgent  # noqa: E402
 from agent.trace import Trace  # noqa: E402
 from ml.registry import ModelRegistry  # noqa: E402
 
-REVIEW = {"verdict": "Usable with care.", "quality_score": 4, "data_issues": ["3% missing salary"],
+REVIEW = {"verdict": "Usable with care.", "quality_score": 4, "expert_answer": "Dept a pays 60 on average.",
+          "data_issues": ["3% missing salary"],
           "insights": ["Engineering pays most"], "advice": ["Break down by hire year"], "confidence": "high"}
 AUDIT = {"summary": "Pay history table, healthy.", "quality_score": 4,
          "issues": [{"severity": "LOW", "column": "to_date", "issue": "sentinel", "impact": "averages skew", "fix": "treat as NULL"}],
@@ -71,7 +72,7 @@ def test_review_uses_task_specific_prompt_and_material(kind, marker, material_ma
     assert system.startswith("You are the Expert AI: HR analyst")
     assert not system.startswith("You are an expert")            # the SQL prompt prefix must stay unique
     assert marker in system and "Return JSON with:" in system
-    assert "QUALITY REPORT:" in user and material_marker in user and "Answer given:\nscripted answer" in user
+    assert "QUALITY REPORT:" in user and material_marker in user and "Answer given" not in user   # answer comes after
     assert schema is ea.REVIEW_SCHEMA and out["task"] == kind
 
 
@@ -82,7 +83,7 @@ def test_review_result_and_trace():
     assert out["verdict"] == "Usable with care." and out["quality_score"] == 4 and out["confidence"] == "high"
     assert out["model"] == "stub-expert" and out["persona"] == DEFAULT_PERSONA
     step = trace.steps[0]
-    assert step.name == "Expert review (expert agent)" and step.status == "ok"
+    assert step.name == "Expert assessment (expert agent)" and step.status == "ok"
     assert step.details["task"] == "data_query" and "33.3% missing" in step.details["quality_report_given_to_model"]
     assert step.details["verdict"] == "Usable with care."
 
@@ -134,6 +135,7 @@ def test_audit_prompt_and_cleaning():
 def test_markdown_renderers():
     md = review_markdown({**REVIEW, "advice": []})
     assert md.startswith("**Verdict** — Usable with care.") and "**Advice**" not in md and "_confidence: high_" in md
+    assert "**Expert answer** — Dept a pays 60 on average." in md
     findings = [Finding("high", "emp_no -> employees", "orphan foreign-key values", "3 rows")]
     rep = audit_markdown({**AUDIT, "issues": [{**AUDIT["issues"][0], "severity": "low"}]}, "salaries", findings, "2026-09-20 10:00")
     assert rep.startswith("# Data-quality audit: salaries") and "| low | to_date | sentinel |" in rep
@@ -152,7 +154,7 @@ def _agent(expert: bool) -> DataAgent:
 def test_dataagent_expert_toggle():
     res = _res()
     _agent(expert=True)._expert(res)
-    assert res.expert["task"] == "data_query" and res.trace.steps[-1].name == "Expert review (expert agent)"
+    assert res.expert["task"] == "data_query" and res.trace.steps[-1].name == "Expert assessment (expert agent)"
     res2 = _res()
     _agent(expert=False)._expert(res2)
     assert res2.expert is None and res2.trace.steps == []
@@ -160,3 +162,33 @@ def test_dataagent_expert_toggle():
     res3.data = None
     _agent(expert=True)._expert(res3)
     assert res3.expert is None
+
+
+# --------------------------------------------------------------- new flow: plan in the material, answer agent gets the assessment
+
+
+def test_assess_material_includes_plan_and_sql_and_expert_answer():
+    from agent.expert_agent import DataPlan
+    llm = StubLLM()
+    res = _res()
+    res.plan = DataPlan(tables=["employees"], order_for_sql="Join current salaries only.", pitfalls=["history rows"])
+    res.sql = "SELECT 1"
+    out = ExpertAgent(llm, briefing="BRIEF {x}").assess(res, Trace("q"))
+    system, user, _ = llm.calls[0]
+    assert "EXPERT'S PLAN" in user and "Join current salaries only." in user and "pitfalls: history rows" in user
+    assert "SQL that ran:" in user and "SELECT 1" in user
+    assert "You are briefed on the database:" in system and "BRIEF {x}" in system   # braces survive (no str.format)
+    assert out["expert_answer"] == "Dept a pays 60 on average."
+
+
+def test_answer_agent_gets_assessment():
+    from agent.answer_agent import fact_sheet
+    res = _res()
+    assert "EXPERT ASSESSMENT" not in fact_sheet(res)
+    res.expert = {**REVIEW, "task": "data_query", "model": "m", "persona": "p"}
+    sheet = fact_sheet(res)
+    assert "EXPERT ASSESSMENT" in sheet and "Verdict: Usable with care." in sheet
+    assert "Expert answer: Dept a pays 60 on average." in sheet and "- 3% missing salary" in sheet
+    llm = StubLLM(out={"answer": "final", "key_findings": [], "interpretation": "", "caveats": []})
+    AnswerAgent(llm).compose(res, Trace("q"))
+    assert "EXPERT ASSESSMENT" in llm.calls[0][1]

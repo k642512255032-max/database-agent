@@ -25,6 +25,13 @@ class Step:
         self.details.update(kwargs)
         return self
 
+    def add_thinking(self, llm: Any, limit: int = 6000) -> "Step":
+        """Record a thinking model's reasoning (Ollama message.thinking) so the trace shows it."""
+        text = (getattr(llm, "last_thinking", "") or "").strip()
+        if text:
+            self.details["thinking"] = text[:limit] + ("\n..." if len(text) > limit else "")
+        return self
+
 @dataclass
 class Trace:
     question: str
