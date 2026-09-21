@@ -31,7 +31,7 @@ The LLM is a lightweight **Qwen2.5-Coder** model served by **Ollama**. Nothing l
 
 Two kinds of model do the work: a **coder** model writes SQL (`OLLAMA_MODEL`), and a **thinking** model explains the
 results, plans the charts and acts as the Expert AI (`OLLAMA_ANSWER_MODEL` / `OLLAMA_EXPERT_MODEL`, default
-`qwen3:8b`). Thinking models reason before they answer - Ollama returns that reasoning separately and the trace
+`qwen3:4b`; `qwen3:8b` is stronger and ~2x slower). Thinking models reason before they answer - Ollama returns that reasoning separately and the trace
 shows it under *Model's thinking* - which helps with abstract or judgement questions; `qwen2.5:7b-instruct` still
 works as a faster non-thinking alternative. Plain data queries skip the
 prose and show the SQL and the result table directly.
@@ -51,7 +51,7 @@ Requirements: Python 3.10+, [Ollama](https://ollama.com), and MySQL 8 (or MariaD
 ```bash
 # LLM
 ollama pull qwen2.5-coder:3b          # ~2 GB. Use :1.5b for weak laptops, :7b for better SQL
-ollama pull qwen3:8b                  # ~5 GB thinking model for answers + the Expert AI (qwen3:4b on weak laptops)
+ollama pull qwen3:4b                  # ~2.5 GB thinking model for answers + the Expert AI (qwen3:8b for better judgement)
 
 # Python
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
@@ -226,8 +226,8 @@ what makes a small local model usable here. The deterministic findings are alway
 * **Expert audit page**: pick a table, click *Audit table*, read the findings and the report, download it as Markdown.
 * **Persona**: the sidebar box *Domain & goals* (e.g. *"HR analytics; we care about pay equity and retention"*) is
   injected into every expert prompt so the advice is business-specific. `EXPERT_PERSONA` sets the default.
-* **Model**: `OLLAMA_EXPERT_MODEL` (empty = the answer model). Use a **thinking** model - `qwen3:8b` by default,
-  `qwen3:14b` if you have the memory; its reasoning is recorded in the trace. Nothing is fine-tuned.
+* **Model**: `OLLAMA_EXPERT_MODEL` (empty = the answer model). Use a **thinking** model - `qwen3:4b` by default,
+  `qwen3:8b` or `qwen3:14b` if you have the memory and patience; its reasoning is recorded in the trace. Nothing is fine-tuned.
 
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),
@@ -266,7 +266,7 @@ prediction changes. It works the same way for every supervised model.
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/k642512255032-max/database-agent/blob/main/deploy/colab/Host_on_Colab.ipynb)
 
 `deploy/colab/Host_on_Colab.ipynb` runs the whole stack on a free Colab T4 GPU and opens a public link:
-MySQL with the `employees` sample database, Ollama with `qwen2.5-coder:7b` + `qwen3:8b`, the trained models and the
+MySQL with the `employees` sample database, Ollama with `qwen2.5-coder:3b` + `qwen3:4b`, the trained models and the
 app, then a Cloudflare quick tunnel (no account). Open the notebook, pick *Runtime → Change runtime type → T4 GPU*,
 *Run all*, wait ~10 minutes, share the `https://….trycloudflare.com` link printed by cell 3 and leave cell 4 running.
 The link lives while the notebook runs (Colab ends sessions after ~90 min idle / ~12 h) and changes on every run.
@@ -289,7 +289,7 @@ Simplest of all - one cell in any fresh T4 notebook (installs, verifies each ste
 |---|---|
 | `DATABASE_URL` | `mysql+pymysql://agent_ro:agent_ro_pw@127.0.0.1:3306/shop` |
 | `OLLAMA_HOST` / `OLLAMA_MODEL` | `http://127.0.0.1:11434` / `qwen2.5-coder:3b` |
-| `OLLAMA_ANSWER_MODEL` / `MAX_CHARTS` | *(same as OLLAMA_MODEL)* / 2 — a thinking model such as `qwen3:8b` is recommended |
+| `OLLAMA_ANSWER_MODEL` / `MAX_CHARTS` | *(same as OLLAMA_MODEL)* / 2 — a thinking model such as `qwen3:4b` is recommended (`qwen3:8b` = stronger, slower) |
 | `OLLAMA_THINKING_MODELS`, `LLM_THINK_TIMEOUT_S` | `qwen3\|deepseek-r1\|gpt-oss\|magistral\|phi4-reasoning`, 900 — names matching the regex run with thinking on and the longer timeout |
 | `SCHEMA_PROBE_MS` | 4000 — time limit per row-count / sample probe at schema load (heavy views are skipped) |
 | `MAX_ROWS`, `MAX_SQL_RETRIES`, `MAX_TABLES_IN_PROMPT` | 1000, 3, 6 |

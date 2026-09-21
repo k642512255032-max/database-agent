@@ -7,9 +7,9 @@ import json, os, re, subprocess, sys, time, urllib.request
 
 APP = "/content/database-agent"
 LOG = "/tmp/agent-logs"
-# Models: override with env vars, e.g.  SQL_MODEL=qwen2.5-coder:3b THINK_MODEL=qwen3:4b  (fast demo pair, 4.4 GB)
-SQL_MODEL = os.environ.get("SQL_MODEL", "qwen2.5-coder:7b")
-THINK_MODEL = os.environ.get("THINK_MODEL", "qwen3:8b")
+# Models: override with env vars, e.g.  SQL_MODEL=qwen2.5-coder:7b THINK_MODEL=qwen3:8b  (stronger pair, 10 GB)
+SQL_MODEL = os.environ.get("SQL_MODEL", "qwen2.5-coder:3b")
+THINK_MODEL = os.environ.get("THINK_MODEL", "qwen3:4b")
 ROOT_PW, RO_USER, RO_PW = "rootpw", "agent_ro", "agent_ro_pw"
 os.makedirs(LOG, exist_ok=True)
 os.environ.pop("OLLAMA_HOST", None)                       # never inherit a stray host setting
