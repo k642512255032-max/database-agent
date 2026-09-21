@@ -261,6 +261,18 @@ the same transformations, and its plan is shown in the UI.
 *Local attribution* sets one column at a time to its typical training value and measures how much the
 prediction changes. It works the same way for every supervised model.
 
+## 4b. Share it temporarily for free (Google Colab GPU)
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/k642512255032-max/database-agent/blob/main/deploy/colab/Host_on_Colab.ipynb)
+
+`deploy/colab/Host_on_Colab.ipynb` runs the whole stack on a free Colab T4 GPU and opens a public link:
+MySQL with the `employees` sample database, Ollama with `qwen2.5-coder:7b` + `qwen3:8b`, the trained models and the
+app, then a Cloudflare quick tunnel (no account). Open the notebook, pick *Runtime → Change runtime type → T4 GPU*,
+*Run all*, wait ~10 minutes, share the `https://….trycloudflare.com` link printed by cell 3 and leave cell 4 running.
+The link lives while the notebook runs (Colab ends sessions after ~90 min idle / ~12 h) and changes on every run.
+Anyone with the link can query the sample data and use the models; Netlify publishing stays off unless you add a
+token on the VM. The same scripts (`deploy/colab/bootstrap.sh`, `serve.sh`) work on Kaggle or any Ubuntu GPU box.
+
 ## 5. Safety
 * sqlglot allows a **single SELECT/WITH/UNION** only. INSERT/UPDATE/DELETE/DDL/`INTO OUTFILE`/multiple statements are rejected.
 * Unknown tables and columns are rejected **before** execution, with a helpful message for the repair step.
@@ -296,6 +308,7 @@ app.py                  Streamlit UI (chat)     ui_shared.py  cached agent share
 pages/1_Dashboards.py   Dashboards page: describe -> build -> preview -> publish
 pages/2_Expert_audit.py Expert audit page: profile a table -> findings -> expert report
 briefings/              database briefings for the expert (employees.md, shop.md; add <database>.md for yours)
+deploy/colab/           free temporary hosting: bootstrap.sh + serve.sh + Host_on_Colab.ipynb
 dashboard/  spec.py  prompts.py  builder.py (design + fetch + render)  render.py (HTML/CSS/JS bundle)
             netlify.py (zip deploy)  store.py (dashboards/*.json)  assets/chart.umd.js (vendored Chart.js)
 train_models.py         one-off training → models/*.joblib + manifest.json
