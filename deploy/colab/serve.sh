@@ -10,10 +10,18 @@ mkdir -p "$LOG_DIR"
 
 # Ollama must be up (bootstrap starts it; a notebook restart may have killed it)
 if ! curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 &
+  setsid nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 < /dev/null &
   for i in $(seq 1 30); do curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
 fi
 mysqladmin ping --silent 2>/dev/null || service mysql start >/dev/null 2>&1 || true
+
+if curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+  echo "Ollama: running - models: $(ollama list 2>/dev/null | awk 'NR>1{print $1}' | tr '
+' ' ')"
+else
+  echo "Ollama: NOT running - last log lines:"; tail -10 "$LOG_DIR/ollama.log" 2>/dev/null || true
+fi
+mysqladmin ping --silent 2>/dev/null && echo "MySQL: running" || echo "MySQL: NOT running"
 
 pkill -f "streamlit run app.py" 2>/dev/null || true
 pkill -f "cloudflared tunnel" 2>/dev/null || true

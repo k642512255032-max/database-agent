@@ -70,7 +70,7 @@ EOF
 say "Ollama"
 command -v ollama >/dev/null 2>&1 || curl -fsSL https://ollama.com/install.sh | sh > "$LOG_DIR/ollama-install.log" 2>&1
 if ! curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 &
+  setsid nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 < /dev/null &
   for i in $(seq 1 30); do curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
 fi
 for m in "$SQL_MODEL" "$THINK_MODEL"; do
