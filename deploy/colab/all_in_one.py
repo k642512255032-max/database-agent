@@ -7,7 +7,9 @@ import json, os, re, subprocess, sys, time, urllib.request
 
 APP = "/content/database-agent"
 LOG = "/tmp/agent-logs"
-SQL_MODEL, THINK_MODEL = "qwen2.5-coder:7b", "qwen3:8b"
+# Models: override with env vars, e.g.  SQL_MODEL=qwen2.5-coder:3b THINK_MODEL=qwen3:4b  (fast demo pair, 4.4 GB)
+SQL_MODEL = os.environ.get("SQL_MODEL", "qwen2.5-coder:7b")
+THINK_MODEL = os.environ.get("THINK_MODEL", "qwen3:8b")
 ROOT_PW, RO_USER, RO_PW = "rootpw", "agent_ro", "agent_ro_pw"
 os.makedirs(LOG, exist_ok=True)
 os.environ.pop("OLLAMA_HOST", None)                       # never inherit a stray host setting
@@ -112,7 +114,7 @@ else:
     ok("employee_features materialised") if r.returncode == 0 else print("  note: materialise skipped, the view still works")
 
 # ------------------------------------------------------------------ 4. Ollama
-step("Ollama on the GPU")
+step(f"Ollama on the GPU (models: {SQL_MODEL}, {THINK_MODEL})")
 OLLAMA_TAR = "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst"
 
 
@@ -149,9 +151,10 @@ for m in (SQL_MODEL, THINK_MODEL):
     if any(x["name"] == m for x in have):
         ok(f"model {m} present")
     else:
-        print(f"  pulling {m} (a few minutes)...", flush=True)
+        print(f"  pulling {m} ...", flush=True)
+        t0 = time.time()
         subprocess.run(f"ollama pull {m}", shell=True, check=True)
-        ok(f"model {m} pulled")
+        ok(f"model {m} pulled in {time.time() - t0:.0f}s")
 print("  test generation with the SQL model...", flush=True)
 t0 = time.time()
 resp = json.load(urllib.request.urlopen(urllib.request.Request(
@@ -219,5 +222,5 @@ if not url:
 print("\n" + "=" * 70)
 print(f"  SHARE THIS LINK:  {url}")
 print("  Everything runs on this Colab VM. Keep the notebook open while people use it.")
-print("  Sidebar should show: Database / SQL · qwen2.5-coder:7b / Answer · qwen3:8b / Expert · qwen3:8b in green.")
+print(f"  Sidebar should show: Database / SQL · {SQL_MODEL} / Answer · {THINK_MODEL} / Expert · {THINK_MODEL} in green.")
 print("=" * 70)
