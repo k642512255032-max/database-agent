@@ -74,8 +74,9 @@ EOF
 say "Ollama"
 if ! command -v ollama >/dev/null 2>&1; then
   # manual install (the install.sh script is flaky on Colab): official tarball into /usr/local
-  curl -fL --retry 3 -o /tmp/ollama.tgz https://ollama.com/download/ollama-linux-amd64.tgz
-  rm -rf /usr/local/lib/ollama && tar -C /usr/local -xzf /tmp/ollama.tgz && chmod +x /usr/local/bin/ollama
+  apt-get install -y -qq zstd >/dev/null 2>&1 || true
+  curl -fL --retry 3 -o /tmp/ollama.tar.zst https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst
+  rm -rf /usr/local/lib/ollama && tar --use-compress-program=unzstd -C /usr/local -xf /tmp/ollama.tar.zst && chmod +x /usr/local/bin/ollama
 fi
 export PATH="/usr/local/bin:$PATH"
 if ! curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then

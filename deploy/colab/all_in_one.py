@@ -113,11 +113,15 @@ else:
 
 # ------------------------------------------------------------------ 4. Ollama
 step("Ollama on the GPU")
+OLLAMA_TAR = "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst"
+
+
 def install_ollama():
-    """Official manual install (the install.sh script is flaky on Colab): download the tarball, unpack to /usr/local."""
+    """Manual install from the GitHub release asset (Ollama ships .tar.zst now; install.sh is flaky on Colab)."""
+    sh("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zstd >/dev/null 2>&1 || true")
     for attempt in range(1, 4):
-        r = subprocess.run("curl -fL --retry 3 -o /tmp/ollama.tgz https://ollama.com/download/ollama-linux-amd64.tgz "
-                           "&& rm -rf /usr/local/lib/ollama && tar -C /usr/local -xzf /tmp/ollama.tgz && chmod +x /usr/local/bin/ollama",
+        r = subprocess.run(f"curl -fL --retry 3 -o /tmp/ollama.tar.zst {OLLAMA_TAR} && rm -rf /usr/local/lib/ollama "
+                           "&& tar --use-compress-program=unzstd -C /usr/local -xf /tmp/ollama.tar.zst && chmod +x /usr/local/bin/ollama",
                            shell=True, capture_output=True, text=True)
         if r.returncode == 0 and os.path.exists("/usr/local/bin/ollama"):
             return True
@@ -128,7 +132,7 @@ def install_ollama():
 
 
 if not (os.path.exists("/usr/local/bin/ollama") or sh("which ollama")):
-    print("  installing Ollama (~1.6 GB download)...", flush=True)
+    print("  installing Ollama (~160 MB download)...", flush=True)
     if not install_ollama():
         bad("could not install Ollama - paste the lines above")
         sys.exit(1)
