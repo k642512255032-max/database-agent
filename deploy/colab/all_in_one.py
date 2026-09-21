@@ -113,10 +113,27 @@ else:
 
 # ------------------------------------------------------------------ 4. Ollama
 step("Ollama on the GPU")
-if not sh("which ollama"):
-    print("  installing...", flush=True)
-    sh("curl -fsSL https://ollama.com/install.sh | sh", check=True)
-ok(f"binary {sh('which ollama')} ({sh('ollama --version')})")
+def install_ollama():
+    """Official manual install (the install.sh script is flaky on Colab): download the tarball, unpack to /usr/local."""
+    for attempt in range(1, 4):
+        r = subprocess.run("curl -fL --retry 3 -o /tmp/ollama.tgz https://ollama.com/download/ollama-linux-amd64.tgz "
+                           "&& rm -rf /usr/local/lib/ollama && tar -C /usr/local -xzf /tmp/ollama.tgz && chmod +x /usr/local/bin/ollama",
+                           shell=True, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.exists("/usr/local/bin/ollama"):
+            return True
+        print(f"  attempt {attempt} failed: {(r.stderr or r.stdout)[-400:].strip()}", flush=True)
+        print("  disk:", sh("df -h /usr/local | tail -1"), flush=True)
+        time.sleep(3)
+    return False
+
+
+if not (os.path.exists("/usr/local/bin/ollama") or sh("which ollama")):
+    print("  installing Ollama (~1.6 GB download)...", flush=True)
+    if not install_ollama():
+        bad("could not install Ollama - paste the lines above")
+        sys.exit(1)
+os.environ["PATH"] = "/usr/local/bin:" + os.environ["PATH"]
+ok(f"binary {sh('which ollama')} ({sh('ollama --version 2>&1 | tail -1')})")
 if not wait("http://127.0.0.1:11434/api/tags", 2):
     daemon("ollama serve", f"{LOG}/ollama.log")
     if not wait("http://127.0.0.1:11434/api/tags", 40):

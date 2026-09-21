@@ -72,7 +72,12 @@ EOF
 
 # ------------------------------------------------------------------ 4. Ollama on the GPU
 say "Ollama"
-command -v ollama >/dev/null 2>&1 || curl -fsSL https://ollama.com/install.sh | sh > "$LOG_DIR/ollama-install.log" 2>&1
+if ! command -v ollama >/dev/null 2>&1; then
+  # manual install (the install.sh script is flaky on Colab): official tarball into /usr/local
+  curl -fL --retry 3 -o /tmp/ollama.tgz https://ollama.com/download/ollama-linux-amd64.tgz
+  rm -rf /usr/local/lib/ollama && tar -C /usr/local -xzf /tmp/ollama.tgz && chmod +x /usr/local/bin/ollama
+fi
+export PATH="/usr/local/bin:$PATH"
 if ! curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
   setsid nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 < /dev/null &
   for i in $(seq 1 30); do curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
