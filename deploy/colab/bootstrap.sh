@@ -47,7 +47,11 @@ $MYSQL -e "CREATE USER IF NOT EXISTS '$RO_USER'@'%' IDENTIFIED BY '$RO_PW';
            GRANT SELECT, SHOW VIEW ON employees.* TO '$RO_USER'@'%'; FLUSH PRIVILEGES;"
 
 say "Feature view + materialised table (employee_features)"
-$MYSQL employees < "$APP_DIR/sample_data/employees_features.sql"
+if [ -z "$($MYSQL -N -e "SELECT 1 FROM information_schema.tables WHERE table_schema='employees' AND table_name='employee_features'")" ]; then
+  $MYSQL employees < "$APP_DIR/sample_data/employees_features.sql"
+else
+  echo "employee_features already exists - skipping view creation"
+fi
 
 # ------------------------------------------------------------------ 3. Python deps + .env
 say "Python dependencies"

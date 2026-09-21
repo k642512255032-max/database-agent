@@ -83,8 +83,12 @@ else:
     ok(f"loaded {int(n):,} employees")
 sh(f"{MY} -e \"CREATE USER IF NOT EXISTS '{RO_USER}'@'%' IDENTIFIED BY '{RO_PW}'; "
    f"GRANT SELECT, SHOW VIEW ON employees.* TO '{RO_USER}'@'%'; FLUSH PRIVILEGES;\"", check=True)
-sh(f"{MY} employees < {APP}/sample_data/employees_features.sql", check=True)
-ok("read-only user + employee_features view")
+kind = sh(f"{MY} -N -e \"SELECT TABLE_TYPE FROM information_schema.tables WHERE table_schema='employees' AND table_name='employee_features'\"")
+if kind:
+    ok(f"read-only user; employee_features already exists ({kind})")
+else:
+    sh(f"{MY} employees < {APP}/sample_data/employees_features.sql", check=True)
+    ok("read-only user + employee_features view")
 
 # ------------------------------------------------------------------ 3. python deps + .env
 step("Python dependencies + .env")
@@ -100,9 +104,12 @@ LLM_TEMPERATURE=0
 MAX_ROWS=1000
 """)
 ok(".env written (DB + models point at this VM)")
-r = subprocess.run(f"cd {APP} && python sample_data/materialise_employee_features.py --admin-url mysql+pymysql://root:{ROOT_PW}@127.0.0.1:3306/employees",
-                   shell=True, capture_output=True, text=True)
-ok("employee_features materialised") if r.returncode == 0 else print("  note: materialise skipped, the view still works")
+if kind == "BASE TABLE":
+    ok("employee_features already materialised")
+else:
+    r = subprocess.run(f"cd {APP} && python sample_data/materialise_employee_features.py --admin-url mysql+pymysql://root:{ROOT_PW}@127.0.0.1:3306/employees",
+                       shell=True, capture_output=True, text=True)
+    ok("employee_features materialised") if r.returncode == 0 else print("  note: materialise skipped, the view still works")
 
 # ------------------------------------------------------------------ 4. Ollama
 step("Ollama on the GPU")
