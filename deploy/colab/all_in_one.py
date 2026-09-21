@@ -10,6 +10,7 @@ LOG = "/tmp/agent-logs"
 # Models: override with env vars, e.g.  SQL_MODEL=qwen2.5-coder:7b THINK_MODEL=qwen3:8b  (stronger pair, 10 GB)
 SQL_MODEL = os.environ.get("SQL_MODEL", "qwen2.5-coder:3b")
 THINK_MODEL = os.environ.get("THINK_MODEL", "qwen3:4b")
+EXPERT_ON = os.environ.get("EXPERT", "0") not in ("0", "false", "no", "")   # EXPERT=1 to start with the Expert AI on
 ROOT_PW, RO_USER, RO_PW = "rootpw", "agent_ro", "agent_ro_pw"
 os.makedirs(LOG, exist_ok=True)
 os.environ.pop("OLLAMA_HOST", None)                       # never inherit a stray host setting
@@ -104,8 +105,10 @@ OLLAMA_EXPERT_MODEL={THINK_MODEL}
 LLM_NUM_CTX=8192
 LLM_TEMPERATURE=0
 MAX_ROWS=1000
+EXPERT_REVIEWS={1 if EXPERT_ON else 0}
+SUMMARISE_DATA_QUERIES=1
 """)
-ok(".env written (DB + models point at this VM)")
+ok(f".env written (DB + models point at this VM; Expert AI {'on' if EXPERT_ON else 'off by default - toggle in the sidebar'})")
 if kind == "BASE TABLE":
     ok("employee_features already materialised")
 else:

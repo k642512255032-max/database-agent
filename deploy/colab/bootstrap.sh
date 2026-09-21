@@ -65,6 +65,7 @@ OLLAMA_EXPERT_MODEL=$THINK_MODEL
 LLM_NUM_CTX=8192
 LLM_TEMPERATURE=0
 MAX_ROWS=1000
+EXPERT_REVIEWS=${EXPERT:-0}
 EOF
 (cd "$APP_DIR" && python sample_data/materialise_employee_features.py \
    --admin-url "mysql+pymysql://root:$MYSQL_ROOT_PW@127.0.0.1:3306/employees" > "$LOG_DIR/materialise.log" 2>&1) \
