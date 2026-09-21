@@ -106,7 +106,10 @@ LLM_NUM_CTX=8192
 LLM_TEMPERATURE=0
 MAX_ROWS=1000
 EXPERT_REVIEWS={1 if EXPERT_ON else 0}
-SUMMARISE_DATA_QUERIES=1
+STANDARDISE_REQUESTS={os.environ.get("STANDARDISE", "1")}
+SUMMARISE_DATA_QUERIES={os.environ.get("SUMMARY", "1")}
+DRAW_CHARTS={os.environ.get("CHARTS", "1")}
+REMEMBER_CONVERSATION={os.environ.get("MEMORY", "1")}
 """)
 ok(f".env written (DB + models point at this VM; Expert AI {'on' if EXPERT_ON else 'off by default - toggle in the sidebar'})")
 if kind == "BASE TABLE":

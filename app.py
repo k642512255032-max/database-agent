@@ -192,18 +192,37 @@ with st.sidebar:
                                  placeholder="Answer model (empty = same as SQL model)",
                                  help="Explains results and plans charts. A general instruct model "
                                       "(e.g. qwen2.5:7b-instruct) writes better prose than a coder model.")
-    charts_on = st.toggle("Draw charts", value=True, help="Let the answer agent plan and draw charts.")
-    summary_on = st.toggle("Summarise data queries", value=settings.summarise_data_queries,
-                           help="Add a short plain-English summary above the result table of plain data queries "
-                                "(one extra answer-model call per question).")
-    st.markdown('<div class="side-label">Expert AI</div>', unsafe_allow_html=True)
-    expert_on = st.toggle("Expert AI", value=settings.expert_reviews,
-                          help="The briefed expert plans the data for the SQL writer and assesses the result before "
-                               "the answer is written (two extra model calls per question).")
     expert_model = st.text_input("Expert model", settings.expert_model, label_visibility="collapsed",
                                  placeholder="Expert model (empty = answer model)",
                                  help="A stronger instruct model, e.g. qwen2.5:14b-instruct, gives better judgement.")
-    persona = expert_persona_input()
+
+    # ---- one switch per agent (each is a model call per question; the router and the SQL writer always run)
+    st.markdown('<div class="side-label">Agents</div>', unsafe_allow_html=True)
+    standardise_on = st.toggle("Request standardiser", value=settings.standardise_requests,
+                               help="Step 0 (SQL model): rewrites the message into one explicit request and resolves "
+                                    "references from the memory. Off = the message is used as typed.")
+    plan_on = st.toggle("Expert data plan",
+                        value=settings.expert_reviews if settings.expert_plan is None else settings.expert_plan,
+                        help="Step 2 (expert model): the briefed expert decides which tables / columns / filters "
+                             "answer the request and writes the order for the SQL writer.")
+    assess_on = st.toggle("Expert assessment",
+                          value=settings.expert_reviews if settings.expert_assess is None else settings.expert_assess,
+                          help="Step 7 (expert model): judges the data, writes its own answer and advice; the answer "
+                               "agent builds on it.")
+    summary_on = st.toggle("Answer summary for data queries", value=settings.summarise_data_queries,
+                           help="Step 8 (answer model): a plain-English summary above the result table of plain data "
+                                "queries. Statistics and ML answers are always written by the answer agent.")
+    charts_on = st.toggle("Chart planner", value=settings.draw_charts,
+                          help="Step 9 (answer model): plans and draws charts for the result.")
+    remember = st.toggle("Conversation memory", value=settings.remember_conversation,
+                         help="Step 10 (answer model): after every answer the context builder updates a compact "
+                              "memory (entities, filters, preferences, facts) that later questions are resolved against.")
+    expert_on = plan_on or assess_on
+    if expert_on:
+        st.markdown('<div class="side-label">Expert AI</div>', unsafe_allow_html=True)
+        persona = expert_persona_input()
+    else:
+        persona = st.session_state.get("expert_persona", settings.expert_persona)
     pbi_source = st.radio("Power BI data source", ["Live MySQL query", "Embedded rows"],
                           index=0 if settings.powerbi_source == "live" else 1, horizontal=True,
                           help="Live: the .pbip runs the generated SQL against MySQL when refreshed (needs MySQL "
@@ -216,7 +235,8 @@ with st.sidebar:
     agent.context_builder.llm = agent.answer_agent.llm      # memory summaries are prose: use the answer model
     agent.expert_agent = ExpertAgent(OllamaLLM(model=expert_model or answer_model or model), persona,
                                      briefing=agent.briefing.text if expert_on else "")
-    agent.expert = expert_on
+    agent.standardise = standardise_on
+    agent.expert_plan, agent.expert_assess = plan_on, assess_on
     if expert_on:
         with st.expander(f"Database briefing · {agent.briefing.name} · {agent.briefing.source}"):
             st.caption(str(agent.briefing.path) if agent.briefing.path else "auto-generated from the schema")
@@ -278,10 +298,6 @@ with st.sidebar:
                 unsafe_allow_html=True)
 
     st.markdown('<div class="side-label">Conversation</div>', unsafe_allow_html=True)
-    remember = st.toggle("Remember conversation", value=True,
-                         help="After every answer a context-builder agent updates a compact memory (entities, "
-                              "filters, preferences, facts found). The next question is standardised against it, "
-                              "so follow-ups like 'how old is he?' resolve to concrete IDs.")
     memory = next((r.context for _, r in reversed(st.session_state.get("history", [])) if r.context), None)
     if remember and memory and not memory.is_empty():
         with st.expander(f"Conversation memory · {memory.turns} turn{'s' if memory.turns != 1 else ''}"):

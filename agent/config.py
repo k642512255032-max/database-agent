@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env"
@@ -31,6 +32,11 @@ def _load_env_file(path: Path) -> None:
         key, value = line.split("=", 1)
         os.environ[key.strip()] = value.strip().strip('"').strip("'")
 _load_env_file(ENV_FILE)
+
+
+def _on(name: str, default: str = "1") -> bool:
+    """True unless the env var is set to 0 / false / no / empty."""
+    return os.getenv(name, default) not in ("0", "false", "no", "")
 
 
 @dataclass
@@ -89,7 +95,13 @@ class Settings:
     # Empty model = same as OLLAMA_ANSWER_MODEL (then OLLAMA_MODEL). A 14B instruct model gives noticeably better advice.
     expert_model: str = os.getenv("OLLAMA_EXPERT_MODEL", "")
     expert_persona: str = os.getenv("EXPERT_PERSONA", "")          # "Domain & goals" text, editable in the sidebar
-    expert_reviews: bool = os.getenv("EXPERT_REVIEWS", "1") not in ("0", "false", "no", "")   # review every chat answer
+    # Each agent can be switched on/off (sidebar "Agents" panel); these are the defaults. 1 = on.
+    standardise_requests: bool = _on("STANDARDISE_REQUESTS", "1")   # step 0: request standardiser (SQL model)
+    expert_reviews: bool = _on("EXPERT_REVIEWS", "1")               # both expert steps unless overridden below
+    expert_plan: Optional[bool] = _on("EXPERT_PLAN") if os.getenv("EXPERT_PLAN") is not None else None      # step 2
+    expert_assess: Optional[bool] = _on("EXPERT_ASSESS") if os.getenv("EXPERT_ASSESS") is not None else None  # step 7
+    draw_charts: bool = _on("DRAW_CHARTS", "1")                     # step 9: chart planner (answer model)
+    remember_conversation: bool = _on("REMEMBER_CONVERSATION", "1") # step 10: context builder (answer model)
     expert_audit_timeout_ms: int = int(os.getenv("EXPERT_AUDIT_TIMEOUT_MS", "20000"))   # per audit query (MySQL hint)
     expert_audit_sample_rows: int = int(os.getenv("EXPERT_AUDIT_SAMPLE_ROWS", "500"))    # rows fetched for sample checks
 

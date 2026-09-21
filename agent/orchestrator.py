@@ -81,7 +81,8 @@ class DataAgent:
                  registry: ModelRegistry | None = None, answer_agent: AnswerAgent | None = None,
                  charts: bool = True, summarise_data: bool | None = None,
                  standardizer: RequestStandardizer | None = None, context_builder: ContextBuilder | None = None,
-                 expert_agent: ExpertAgent | None = None, expert: bool = False):
+                 expert_agent: ExpertAgent | None = None, expert: bool = False, standardise: bool = True,
+                 expert_plan: bool | None = None, expert_assess: bool | None = None):
         self.db = db or Database()
         self.llm = llm or OllamaLLM()
         self.registry = registry or ModelRegistry()
@@ -92,7 +93,10 @@ class DataAgent:
         self.context_builder = context_builder or ContextBuilder(self.answer_agent.llm)
         # step 7b: the expert agent shares the answer model unless OLLAMA_EXPERT_MODEL names a stronger one
         self.expert_agent = expert_agent or ExpertAgent(self.answer_agent.llm if not settings.expert_model else None)
-        self.expert = expert
+        # per-agent switches: `expert` sets both expert steps unless one is given explicitly
+        self.standardise = standardise
+        self.expert_plan = expert if expert_plan is None else expert_plan
+        self.expert_assess = expert if expert_assess is None else expert_assess
         self._briefing: Briefing | None = None      # loaded lazily: tests build agents without a real database
         self.charts = charts
         # plain-English summary for data queries; costs one answer-model call per query
@@ -142,11 +146,24 @@ class DataAgent:
     # ============================================== 0. request standardiser
     _conversation_tables_hint = ""
 
+    @property
+    def expert(self) -> bool:
+        """True when either expert step is on (kept for callers that treat the expert as one switch)."""
+        return self.expert_plan or self.expert_assess
+
+    @expert.setter
+    def expert(self, value: bool) -> None:
+        self.expert_plan = self.expert_assess = bool(value)
+
     def _standardise(self, res: AgentResult, ctx: ConversationContext, history: list[AgentResult]) -> None:
         last = next((h for h in reversed(history) if h.sql or h.answer), None)
         previous = previous_turn_text(last.standalone_question or last.question, last.sql, last.frame(),
                                       last.answer) if last else ""
-        req = self.standardizer.standardize(res.question, ctx, previous, res.trace)
+        if self.standardise:
+            req = self.standardizer.standardize(res.question, ctx, previous, res.trace)
+        else:   # agent switched off: the message is used as typed (no LLM call, no trace step)
+            q = " ".join(res.question.split())
+            req = StandardRequest(question=q, standalone_question=q)
         res.request, res.standalone_question = req, req.standalone_question
         res.extras["request"] = req.to_dict()
         memory = ctx.as_text()
@@ -233,8 +250,8 @@ class DataAgent:
 
     # ============================================== 2. expert data plan
     def _plan(self, res: AgentResult) -> None:
-        """The briefed expert decides what data is needed; no-op when the expert is off."""
-        if not self.expert:
+        """The briefed expert decides what data is needed; no-op when the plan step is off."""
+        if not self.expert_plan:
             return
         schema = self.db.schema()
         if len(schema) <= settings.max_tables_in_prompt * 2:
@@ -266,7 +283,7 @@ class DataAgent:
                 s.add(source="expert plan")
             else:
                 tables, scores = self.db.link_tables(res.standalone_question + " " + self._conversation_tables_hint)
-                s.add(source="lexical linking" + (" (expert plan unavailable)" if self.expert else ""),
+                s.add(source="lexical linking" + (" (expert plan unavailable)" if self.expert_plan else ""),
                       relevance_scores={k: v for k, v in scores.items() if v})
             for t in self._model_tables(res):
                 if t not in tables:
@@ -419,7 +436,7 @@ class DataAgent:
     # ================================================== 7. expert assessment
     def _expert(self, res: AgentResult) -> None:
         """Runs before the answer agent: its output is part of the fact sheet the answer is written from."""
-        if self.expert and res.data is not None:
+        if self.expert_assess and res.data is not None:
             res.expert = self.expert_agent.assess(res, res.trace)
 
 
