@@ -273,6 +273,11 @@ The link lives while the notebook runs (Colab ends sessions after ~90 min idle /
 Anyone with the link can query the sample data and use the models; Netlify publishing stays off unless you add a
 token on the VM. The same scripts (`deploy/colab/bootstrap.sh`, `serve.sh`) work on Kaggle or any Ubuntu GPU box.
 
+Simplest of all - one cell in any fresh T4 notebook (installs, verifies each step, starts the app, prints the link):
+```python
+!curl -sL https://raw.githubusercontent.com/k642512255032-max/database-agent/main/deploy/colab/all_in_one.py | python
+```
+
 ## 5. Safety
 * sqlglot allows a **single SELECT/WITH/UNION** only. INSERT/UPDATE/DELETE/DDL/`INTO OUTFILE`/multiple statements are rejected.
 * Unknown tables and columns are rejected **before** execution, with a helpful message for the repair step.
