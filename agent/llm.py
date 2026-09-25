@@ -32,6 +32,11 @@ class OllamaLLM:
         self.host = (host or settings.ollama_host).rstrip("/")
         self.think = is_thinking_model(self.model) if think is None else think
         self.last_thinking: str = ""          # reasoning of the last call (thinking models only)
+        self.last_stats: dict[str, Any] = {}  # Ollama timings / token counts of the last call (nanoseconds)
+
+    def light(self) -> "OllamaLLM":
+        """The same model with thinking off: for steps that only fill a JSON form (charts, memory, brief summary)."""
+        return OllamaLLM(self.model, self.host, think=False)
 
     # ------------------------------------------------------------------ utils
     def health(self) -> tuple[bool, str]:
@@ -45,6 +50,16 @@ class OllamaLLM:
         except Exception as exc:
             return False, f"Cannot reach Ollama at {self.host}: {exc}"
 
+    def warm(self) -> tuple[bool, str]:
+        """Load the model now (an empty chat request) so the first real call does not pay the load time."""
+        try:
+            r = requests.post(f"{self.host}/api/chat", json={"model": self.model, "messages": [],
+                                                              "keep_alive": settings.llm_keep_alive}, timeout=120)
+            r.raise_for_status()
+            return True, f"{self.model} loaded"
+        except requests.RequestException as exc:
+            return False, f"could not load {self.model}: {exc}"
+
     # ------------------------------------------------------------------- core
     def chat(self, system: str, user: str, schema: Optional[dict] = None) -> str:
         payload: dict[str, Any] = {
@@ -55,6 +70,7 @@ class OllamaLLM:
                 {"role": "user", "content": user},
             ],
             "options": {"temperature": settings.temperature, "num_ctx": settings.num_ctx},
+            "keep_alive": settings.llm_keep_alive,   # keep the model (and its prompt cache) loaded between calls
         }
         if schema is not None:
             payload["format"] = schema  # Ollama >= 0.5 structured outputs
@@ -66,13 +82,23 @@ class OllamaLLM:
             r.raise_for_status()
         except requests.RequestException as exc:
             raise LLMError(f"Ollama request failed: {exc}") from exc
-        message = r.json()["message"]
+        body = r.json()
+        message = body["message"]
         self.last_thinking = (message.get("thinking") or "").strip()
+        self.last_stats = {k: body.get(k, 0) for k in ("total_duration", "load_duration", "prompt_eval_count",
+                                                      "prompt_eval_duration", "eval_count", "eval_duration")}
         return message["content"]
 
     def chat_json(self, system: str, user: str, schema: dict) -> dict:
         raw = self.chat(system, user, schema=schema)
         return parse_json(raw)
+
+
+def light_llm(llm: Any) -> Any:
+    """LLM for a light step: thinking off unless THINK_LIGHT_STEPS=1; fakes without .light() are returned as is."""
+    if settings.think_light_steps or not hasattr(llm, "light"):
+        return llm
+    return llm.light()
 
 
 THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S)

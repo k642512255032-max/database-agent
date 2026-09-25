@@ -106,7 +106,10 @@ LLM_NUM_CTX=8192
 LLM_TEMPERATURE=0
 MAX_ROWS=1000
 EXPERT_REVIEWS={1 if EXPERT_ON else 0}
-SUMMARISE_DATA_QUERIES=1
+STANDARDISE_REQUESTS={os.environ.get("STANDARDISE", "1")}
+SUMMARISE_DATA_QUERIES={os.environ.get("SUMMARY", "1")}
+DRAW_CHARTS={os.environ.get("CHARTS", "1")}
+REMEMBER_CONVERSATION={os.environ.get("MEMORY", "1")}
 """)
 ok(f".env written (DB + models point at this VM; Expert AI {'on' if EXPERT_ON else 'off by default - toggle in the sidebar'})")
 if kind == "BASE TABLE":
@@ -144,7 +147,10 @@ if not (os.path.exists("/usr/local/bin/ollama") or sh("which ollama")):
 os.environ["PATH"] = "/usr/local/bin:" + os.environ["PATH"]
 ok(f"binary {sh('which ollama')} ({sh('ollama --version 2>&1 | tail -1')})")
 if not wait("http://127.0.0.1:11434/api/tags", 2):
-    daemon("ollama serve", f"{LOG}/ollama.log")
+    # same server tuning as deploy/windows/ollama_env.ps1: 4 prompt-cache slots per model (the pipeline sends several
+    # prompt families to one model), models never unload, flash attention + q8_0 KV cache to halve KV memory
+    daemon("OLLAMA_NUM_PARALLEL=4 OLLAMA_KEEP_ALIVE=-1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve",
+           f"{LOG}/ollama.log")
     if not wait("http://127.0.0.1:11434/api/tags", 40):
         bad("ollama serve did not come up; log:\n" + sh(f"tail -20 {LOG}/ollama.log"))
         sys.exit(1)

@@ -230,8 +230,8 @@ def test_follow_up_question_uses_previous_answer(db):
     assert first.error is None and len(first.data) == 1
     cid = int(first.data.iloc[0]["customer_id"])
 
-    # the context builder ran after the first answer and remembered the customer
-    assert first.context is not None and first.context.turns == 1 and "customers" in first.context.tables
+    # the context builder ran after the first answer (in the background) and remembered the customer
+    assert first.wait_context() is not None and first.context.turns == 1 and "customers" in first.context.tables
     assert first.trace.steps[-1].name == "Update conversation context"
 
     llm = ScriptedLLM(
@@ -254,7 +254,7 @@ def test_follow_up_question_uses_previous_answer(db):
     assert "Conversation memory" in sql_prompt and f"How old is customer {cid}?" in sql_prompt
     assert "Request details" in sql_prompt and f"customer_id = {cid}" in sql_prompt
     assert len(second.data) == 1
-    assert second.context.turns == 2
+    assert second.wait_context().turns == 2
 
 
 def test_independent_question_is_kept_as_typed(db):
@@ -295,7 +295,7 @@ def test_context_builder_merges_and_survives_llm_failure(db):
     old = ConversationContext(summary="looking at customers", preferences=["always top 10"], tables=["orders"], turns=3)
     llm = NoContext({"reasoning": "x", "intent": "data_query", "model_name": ""}, ["SELECT COUNT(*) AS n FROM customers"])
     r = agent(db, llm).ask("How many customers are there?", context=old)
-    ctx = r.context
+    ctx = r.wait_context()      # the memory update runs in the background (DEFER_MEMORY_UPDATE)
     assert r.error is None and r.trace.steps[-1].status == "warning"
     assert ctx.turns == 4 and ctx.tables == ["orders", "customers"]        # deterministic bookkeeping
     assert ctx.preferences == ["always top 10"] and ctx.summary == "looking at customers"   # memory kept
@@ -306,8 +306,9 @@ def test_context_builder_merges_and_survives_llm_failure(db):
                                "filters": ["active only"], "metrics": ["count"], "preferences": ["always top 10"],
                                "findings": ["there are N customers"]})
     r = agent(db, llm).ask("How many customers are there?", context=old)
-    assert r.context.entities == {"customer": "id 1 (Ann)"} and r.context.turns == 4
-    assert "customer = id 1 (Ann)" in r.context.as_text() and "always top 10" in r.context.as_text()
+    ctx = r.wait_context()
+    assert ctx.entities == {"customer": "id 1 (Ann)"} and ctx.turns == 4
+    assert "customer = id 1 (Ann)" in ctx.as_text() and "always top 10" in ctx.as_text()
     # build_context=False leaves the memory untouched and skips the LLM call
     llm = ScriptedLLM({"reasoning": "x", "intent": "data_query", "model_name": ""}, ["SELECT COUNT(*) AS n FROM customers"])
     r = agent(db, llm).ask("How many customers are there?", context=old, build_context=False)

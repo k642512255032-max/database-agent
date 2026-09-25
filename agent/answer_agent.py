@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from .config import settings
-from .llm import OllamaLLM
+from .llm import OllamaLLM, light_llm
 from .trace import Trace
 
 if TYPE_CHECKING:  # avoid a circular import at runtime
@@ -143,10 +143,13 @@ class AnswerAgent:
                         "A second model turns the computed facts into a coherent explanation: answer, "
                         "key findings, interpretation and caveats.") as s:
             facts = fact_sheet(res)
-            s.add(model=getattr(self.llm, "model", "?"), facts_given_to_model=facts)
+            # a brief summary only restates the table: no need for the model to reason first
+            llm = light_llm(self.llm) if brief else self.llm
+            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not self.llm else "on",
+                  facts_given_to_model=facts)
             try:
-                out = self.llm.chat_json(system, f"Question: {res.standalone_question}\n\nFACT SHEET:\n{facts}", schema)
-                s.add_thinking(self.llm)
+                out = llm.chat_json(system, f"Question: {res.standalone_question}\n\nFACT SHEET:\n{facts}", schema)
+                s.add_thinking(llm)
                 out = {k: out.get(k) for k in schema["properties"]}     # brief mode renders only its own fields
                 if not (out.get("answer") or "").strip():
                     raise ValueError("empty answer")
@@ -166,12 +169,15 @@ class AnswerAgent:
         with trace.step("Plan charts (answer agent)",
                         "Choose chart type and columns that visualise the finding; the choice is validated "
                         "against the real columns before drawing.") as s:
-            s.add(model=getattr(self.llm, "model", "?"), column_profile=profile_text(prof))
+            llm = light_llm(self.llm)      # picking columns for a chart is form-filling, not reasoning
+            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not self.llm else "on",
+                  column_profile=profile_text(prof))
             specs: list[dict] = []
             try:
-                out = self.llm.chat_json(CHART_SYSTEM, f"Question: {res.standalone_question}\n\n"
-                                         f"Result table profile ({len(df)} rows):\n{profile_text(prof)}\nJSON:",
-                                         CHART_SCHEMA)
+                out = llm.chat_json(CHART_SYSTEM, f"Question: {res.standalone_question}\n\n"
+                                    f"Result table profile ({len(df)} rows):\n{profile_text(prof)}\nJSON:",
+                                    CHART_SCHEMA)
+                s.add_thinking(llm)
                 proposed = out.get("charts") or []
                 rejected = []
                 for spec in proposed:

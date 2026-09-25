@@ -22,6 +22,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -37,12 +38,15 @@ from .context import ContextBuilder, ConversationContext
 from .briefing import Briefing, load_briefing
 from .db import Database, UnsafeSQLError
 from .expert_agent import DataPlan, ExpertAgent
+from .knowledge import KnowledgeBase, KnowledgeLLM
 from .llm import OllamaLLM
 from .request_agent import RequestStandardizer, StandardRequest, previous_turn_text
 from .trace import Step, Trace
 
 ML_WORDS = r"predict|forecast|classif|cluster|segment|group similar|anomal|outlier|unusual|suspicious|fraud|pca|principal component|churn risk|likely to"
 STATS_WORDS = r"correlat|significan|t-test|ttest|anova|chi|regression|relationship|distribution|normal|variance|hypothesis|statistic|describe"
+# standardiser tasks that are always plain SQL: the router model call is skipped for them (ROUTER_SHORTCUT)
+PLAIN_TASKS = {"lookup", "list", "count", "aggregate", "rank", "compare", "trend"}
 
 
 @dataclass
@@ -64,6 +68,17 @@ class AgentResult:
     plan: Optional[DataPlan] = None             # the expert's data order for the SQL writer
     error: Optional[str] = None
     extras: dict = field(default_factory=dict)
+    _context_future: Any = field(default=None, repr=False, compare=False)   # deferred memory update, if running
+
+    def wait_context(self) -> Optional[ConversationContext]:
+        """The conversation memory after this turn, waiting for a deferred update if one is still running."""
+        if self._context_future is not None:
+            self.context = self._context_future.result()
+            self._context_future = None
+        return self.context
+
+    def context_pending(self) -> bool:
+        return self._context_future is not None and not self._context_future.done()
 
     def frame(self) -> Optional[pd.DataFrame]:
         """The table the user sees: query rows, with model outputs prepended for ML."""
@@ -81,7 +96,9 @@ class DataAgent:
                  registry: ModelRegistry | None = None, answer_agent: AnswerAgent | None = None,
                  charts: bool = True, summarise_data: bool | None = None,
                  standardizer: RequestStandardizer | None = None, context_builder: ContextBuilder | None = None,
-                 expert_agent: ExpertAgent | None = None, expert: bool = False):
+                 expert_agent: ExpertAgent | None = None, expert: bool = False, standardise: bool = True,
+                 expert_plan: bool | None = None, expert_assess: bool | None = None,
+                 knowledge: KnowledgeBase | None = None):
         self.db = db or Database()
         self.llm = llm or OllamaLLM()
         self.registry = registry or ModelRegistry()
@@ -92,11 +109,25 @@ class DataAgent:
         self.context_builder = context_builder or ContextBuilder(self.answer_agent.llm)
         # step 7b: the expert agent shares the answer model unless OLLAMA_EXPERT_MODEL names a stronger one
         self.expert_agent = expert_agent or ExpertAgent(self.answer_agent.llm if not settings.expert_model else None)
-        self.expert = expert
+        # per-agent switches: `expert` sets both expert steps unless one is given explicitly
+        self.standardise = standardise
+        self.expert_plan = expert if expert_plan is None else expert_plan
+        self.expert_assess = expert if expert_assess is None else expert_assess
         self._briefing: Briefing | None = None      # loaded lazily: tests build agents without a real database
         self.charts = charts
         # plain-English summary for data queries; costs one answer-model call per query
         self.summarise_data = settings.summarise_data_queries if summarise_data is None else summarise_data
+        # one worker for the deferred memory update (DEFER_MEMORY_UPDATE): the answer is shown while it runs
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
+        # "Fine-tune agents" page: each agent reads its own uploaded documents (and fine-tuned model, if set).
+        # The wrappers pass calls through unchanged while an agent has nothing learned.
+        self.knowledge = knowledge or KnowledgeBase()
+        self._router_llm = KnowledgeLLM(self.llm, self.knowledge, "router")
+        self._sql_llm = KnowledgeLLM(self.llm, self.knowledge, "sql")
+        for owner, key in ((self.standardizer, "understanding"), (self.context_builder, "memory"),
+                           (self.expert_agent, "expert"), (self.answer_agent, "answer")):
+            if not isinstance(owner.llm, KnowledgeLLM):
+                owner.llm = KnowledgeLLM(owner.llm, self.knowledge, key)
 
     # ================================================================ public
     def ask(self, question: str, on_step: Callable[[Step], None] | None = None,
@@ -109,6 +140,8 @@ class DataAgent:
         res = AgentResult(question, trace)
         res.standalone_question = question
         history = history or []
+        for h in history:            # a deferred memory update of an earlier turn must be in before we read it
+            h.wait_context()
         ctx = context or next((h.context for h in reversed(history) if h.context is not None),
                               ConversationContext())
         self._conversation = ""
@@ -130,23 +163,42 @@ class DataAgent:
         except Exception as exc:
             res.error = f"{type(exc).__name__}: {exc}"
             res.answer = f"I could not complete this request: {exc}"
-        if build_context:
-            try:
-                res.context = self.context_builder.update(ctx, res, trace)
-            except Exception:   # the answer is already there; never lose it over the memory update
-                res.context = ctx
+        if build_context and settings.defer_memory_update:
+            # the answer goes to the user now; the next ask() waits for this future through wait_context()
+            res._context_future = self._executor.submit(self._update_context, ctx, res, trace)
+        elif build_context:
+            res.context = self._update_context(ctx, res, trace)
         else:
             res.context = ctx
         return res
 
+    def _update_context(self, ctx: ConversationContext, res: AgentResult, trace: Trace) -> ConversationContext:
+        try:
+            return self.context_builder.update(ctx, res, trace)
+        except Exception:   # the answer is already there; never lose it over the memory update
+            return ctx
+
     # ============================================== 0. request standardiser
     _conversation_tables_hint = ""
+
+    @property
+    def expert(self) -> bool:
+        """True when either expert step is on (kept for callers that treat the expert as one switch)."""
+        return self.expert_plan or self.expert_assess
+
+    @expert.setter
+    def expert(self, value: bool) -> None:
+        self.expert_plan = self.expert_assess = bool(value)
 
     def _standardise(self, res: AgentResult, ctx: ConversationContext, history: list[AgentResult]) -> None:
         last = next((h for h in reversed(history) if h.sql or h.answer), None)
         previous = previous_turn_text(last.standalone_question or last.question, last.sql, last.frame(),
                                       last.answer) if last else ""
-        req = self.standardizer.standardize(res.question, ctx, previous, res.trace)
+        if self.standardise:
+            req = self.standardizer.standardize(res.question, ctx, previous, res.trace)
+        else:   # agent switched off: the message is used as typed (no LLM call, no trace step)
+            q = " ".join(res.question.split())
+            req = StandardRequest(question=q, standalone_question=q)
         res.request, res.standalone_question = req, req.standalone_question
         res.extras["request"] = req.to_dict()
         memory = ctx.as_text()
@@ -178,18 +230,27 @@ class DataAgent:
                             "Decide whether this needs plain SQL, a statistical test, or a trained ML model.") as s:
             cards = {c["name"]: c for c in self.registry.cards()}
             s.add(available_models=list(cards) or "none")
+            q = res.standalone_question.lower()
+            task = res.request.task if res.request is not None else "other"
             if force_intent:
                 intent, model, reasoning = force_intent, force_model or "", "Intent chosen manually in the UI."
+            elif (settings.router_shortcut and task in PLAIN_TASKS
+                  and not re.search(ML_WORDS, q) and not re.search(STATS_WORDS, q)):
+                # the standardiser already classified the request as plain SQL: no second model call needed
+                intent, model = "data_query", ""
+                reasoning = (f"The standardiser classified this as '{task}' and no statistics / ML words appear; "
+                             "router skipped.")
+                s.add(router="skipped")
             else:
                 try:
-                    out = self.llm.chat_json(prompts.ROUTER_SYSTEM,
+                    out = self._router_llm.chat_json(prompts.ROUTER_SYSTEM,
                                              prompts.router_user(res.standalone_question, self.registry.manifest_text()),
                                              prompts.ROUTER_SCHEMA)
+                    s.add_thinking(self._router_llm)
                     intent, model, reasoning = out.get("intent"), out.get("model_name", ""), out.get("reasoning")
                 except Exception as exc:
                     intent, model, reasoning = None, "", f"LLM router failed ({exc}); used keyword rules."
                 # keyword safety net
-                q = res.standalone_question.lower()
                 if intent not in {"data_query", "statistics", "machine_learning"}:
                     intent = ("machine_learning" if re.search(ML_WORDS, q) and cards
                               else "statistics" if re.search(STATS_WORDS, q) else "data_query")
@@ -233,8 +294,8 @@ class DataAgent:
 
     # ============================================== 2. expert data plan
     def _plan(self, res: AgentResult) -> None:
-        """The briefed expert decides what data is needed; no-op when the expert is off."""
-        if not self.expert:
+        """The briefed expert decides what data is needed; no-op when the plan step is off."""
+        if not self.expert_plan:
             return
         schema = self.db.schema()
         if len(schema) <= settings.max_tables_in_prompt * 2:
@@ -266,7 +327,7 @@ class DataAgent:
                 s.add(source="expert plan")
             else:
                 tables, scores = self.db.link_tables(res.standalone_question + " " + self._conversation_tables_hint)
-                s.add(source="lexical linking" + (" (expert plan unavailable)" if self.expert else ""),
+                s.add(source="lexical linking" + (" (expert plan unavailable)" if self.expert_plan else ""),
                       relevance_scores={k: v for k, v in scores.items() if v})
             for t in self._model_tables(res):
                 if t not in tables:
@@ -292,8 +353,9 @@ class DataAgent:
             extra = self._conversation + "\n" + extra
 
         with res.trace.step("Generate SQL", "Translate the English request into a SQL query using the schema.") as s:
-            out = self.llm.chat_json(prompts.SQL_SYSTEM.format(dialect=dialect),
+            out = self._sql_llm.chat_json(prompts.SQL_SYSTEM.format(dialect=dialect),
                                      prompts.sql_user(res.standalone_question, schema_text, extra), prompts.SQL_SCHEMA)
+            s.add_thinking(self._sql_llm)
             sql = _clean_sql(out.get("sql", ""))
             s.reasoning = out.get("reasoning")
             s.add(sql=sql, schema_given_to_model=schema_text)
@@ -303,9 +365,10 @@ class DataAgent:
             if last_error is not None:
                 with res.trace.step(f"Repair SQL (attempt {attempt - 1})",
                                     "The previous query failed; the error message is sent back to the model to fix it.") as s:
-                    out = self.llm.chat_json(prompts.FIX_SYSTEM.format(dialect=dialect),
+                    out = self._sql_llm.chat_json(prompts.FIX_SYSTEM.format(dialect=dialect),
                                              prompts.fix_user(res.standalone_question, schema_text, sql, last_error, extra),
                                              prompts.SQL_SCHEMA)
+                    s.add_thinking(self._sql_llm)
                     sql = _clean_sql(out.get("sql", ""))
                     s.reasoning = out.get("reasoning")
                     s.add(previous_error=last_error, sql=sql)
@@ -350,6 +413,7 @@ class DataAgent:
             try:
                 out = self.llm.chat_json(prompts.STATS_SYSTEM, prompts.stats_user(res.standalone_question, profile),
                                          prompts.STATS_SCHEMA)
+                s.add_thinking(self.llm)
             except Exception as exc:
                 out = {"method": "describe", "target": "", "group": "", "columns": [],
                        "reasoning": f"LLM failed ({exc}); defaulting to descriptive statistics."}
@@ -419,7 +483,7 @@ class DataAgent:
     # ================================================== 7. expert assessment
     def _expert(self, res: AgentResult) -> None:
         """Runs before the answer agent: its output is part of the fact sheet the answer is written from."""
-        if self.expert and res.data is not None:
+        if self.expert_assess and res.data is not None:
             res.expert = self.expert_agent.assess(res, res.trace)
 
 

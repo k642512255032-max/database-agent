@@ -92,10 +92,10 @@ class StubDB:
         return pd.DataFrame({"dept_name": ["Development", "Sales"], "avg_salary": [67000.0, 60000.0]})
 
 
-def _agent(expert: bool, plan_fails: bool = False) -> tuple[DataAgent, FlowLLM]:
+def _agent(expert: bool, plan_fails: bool = False, **switches) -> tuple[DataAgent, FlowLLM]:
     llm = FlowLLM(plan_fails)
     agent = DataAgent(db=StubDB(), llm=llm, registry=ModelRegistry(), answer_agent=AnswerAgent(llm),
-                      expert_agent=ExpertAgent(llm), charts=False, summarise_data=True, expert=expert)
+                      expert_agent=ExpertAgent(llm), charts=False, summarise_data=True, expert=expert, **switches)
     agent._briefing = Briefing("employees", "file", None, "BRIEFING: to_date 9999-01-01 means current")
     return agent, llm
 
@@ -157,3 +157,39 @@ def test_plan_failure_falls_back_but_assessment_still_runs():
     sql_prompt = next(u for s, u in llm.calls if s.startswith("You are an expert"))
     assert "Expert's data order" not in sql_prompt
     assert res.expert is not None and "Expert assessment (expert agent)" in _step_names(res)
+
+
+# ------------------------------------------------------------------ per-agent switches
+def test_expert_plan_and_assessment_switch_separately():
+    # plan on, assessment off
+    agent, llm = _agent(expert=True, expert_assess=False)
+    res = agent.ask("average salary per department", build_context=False)
+    names = _step_names(res)
+    assert "Expert data plan (expert agent)" in names and "Expert assessment (expert agent)" not in names
+    assert res.plan is not None and res.expert is None
+    assert agent.expert is True                    # either step on => the expert counts as on
+    # plan off, assessment on
+    agent, llm = _agent(expert=False, expert_assess=True)
+    res = agent.ask("average salary per department", build_context=False)
+    names = _step_names(res)
+    assert "Expert data plan (expert agent)" not in names and "Expert assessment (expert agent)" in names
+    assert res.plan is None and res.expert is not None
+    assert res.trace.steps[2].details["source"] == "lexical linking"     # no "(expert plan unavailable)" when off
+
+
+def test_expert_setter_flips_both_steps():
+    agent, _ = _agent(expert=True)
+    agent.expert = False
+    assert agent.expert_plan is False and agent.expert_assess is False and agent.expert is False
+    agent.expert = True
+    assert agent.expert_plan and agent.expert_assess
+
+
+def test_standardiser_off_uses_message_as_typed_without_llm_call():
+    agent, llm = _agent(expert=False, standardise=False)
+    res = agent.ask("  average   salary per department ", build_context=False)
+    assert res.error is None
+    assert "Standardise the request" not in _step_names(res)
+    assert not any(s.startswith("You standardise") for s, _ in llm.calls)
+    assert res.standalone_question == "average salary per department"      # whitespace collapsed, otherwise as typed
+    assert res.request is not None and res.request.question == "average salary per department"

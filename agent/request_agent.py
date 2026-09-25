@@ -13,9 +13,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
-
 import pandas as pd
-
 from . import prompts
 from .context import ConversationContext, _clean_list, _clip
 from .llm import OllamaLLM
@@ -80,6 +78,7 @@ class RequestStandardizer:
             try:
                 out = self.llm.chat_json(prompts.REQUEST_SYSTEM, prompts.request_user(memory, previous, q),
                                          prompts.REQUEST_SCHEMA)
+                s.add_thinking(self.llm)
             except Exception as exc:
                 s.status = "warning"
                 s.add(note=f"Standardiser failed ({exc}); the message is used as typed.")

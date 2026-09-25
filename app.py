@@ -98,6 +98,7 @@ h1,h2,h3,h4,h5{letter-spacing:-.015em;}
 .step-num.err{background:var(--err-soft); color:var(--err-ink); border-color:var(--err-line);}
 .step-title{font-weight:620; font-size:.95rem; color:var(--ink);}
 .step-time{margin-left:auto; font-size:.72rem; color:var(--faint); font-variant-numeric:tabular-nums;}
+.step-tok{font-size:.72rem; color:var(--faint); font-variant-numeric:tabular-nums; white-space:nowrap;}
 .step-why{color:var(--muted); font-size:.83rem; line-height:1.5; margin:.5rem 0 .1rem;}
 .reasoning{margin:.75rem 0 .2rem; padding:.6rem .8rem; border-left:2px solid var(--brand);
   background:var(--brand-soft); border-radius:0 6px 6px 0; font-size:.84rem;
@@ -192,18 +193,37 @@ with st.sidebar:
                                  placeholder="Answer model (empty = same as SQL model)",
                                  help="Explains results and plans charts. A general instruct model "
                                       "(e.g. qwen2.5:7b-instruct) writes better prose than a coder model.")
-    charts_on = st.toggle("Draw charts", value=True, help="Let the answer agent plan and draw charts.")
-    summary_on = st.toggle("Summarise data queries", value=settings.summarise_data_queries,
-                           help="Add a short plain-English summary above the result table of plain data queries "
-                                "(one extra answer-model call per question).")
-    st.markdown('<div class="side-label">Expert AI</div>', unsafe_allow_html=True)
-    expert_on = st.toggle("Expert AI", value=settings.expert_reviews,
-                          help="The briefed expert plans the data for the SQL writer and assesses the result before "
-                               "the answer is written (two extra model calls per question).")
     expert_model = st.text_input("Expert model", settings.expert_model, label_visibility="collapsed",
                                  placeholder="Expert model (empty = answer model)",
                                  help="A stronger instruct model, e.g. qwen2.5:14b-instruct, gives better judgement.")
-    persona = expert_persona_input()
+
+    # ---- one switch per agent (each is a model call per question; the router and the SQL writer always run)
+    st.markdown('<div class="side-label">Agents</div>', unsafe_allow_html=True)
+    standardise_on = st.toggle("Request standardiser", value=settings.standardise_requests,
+                               help="Step 0 (SQL model): rewrites the message into one explicit request and resolves "
+                                    "references from the memory. Off = the message is used as typed.")
+    plan_on = st.toggle("Expert data plan",
+                        value=settings.expert_reviews if settings.expert_plan is None else settings.expert_plan,
+                        help="Step 2 (expert model): the briefed expert decides which tables / columns / filters "
+                             "answer the request and writes the order for the SQL writer.")
+    assess_on = st.toggle("Expert assessment",
+                          value=settings.expert_reviews if settings.expert_assess is None else settings.expert_assess,
+                          help="Step 7 (expert model): judges the data, writes its own answer and advice; the answer "
+                               "agent builds on it.")
+    summary_on = st.toggle("Answer summary for data queries", value=settings.summarise_data_queries,
+                           help="Step 8 (answer model): a plain-English summary above the result table of plain data "
+                                "queries. Statistics and ML answers are always written by the answer agent.")
+    charts_on = st.toggle("Chart planner", value=settings.draw_charts,
+                          help="Step 9 (answer model): plans and draws charts for the result.")
+    remember = st.toggle("Conversation memory", value=settings.remember_conversation,
+                         help="Step 10 (answer model): after every answer the context builder updates a compact "
+                              "memory (entities, filters, preferences, facts) that later questions are resolved against.")
+    expert_on = plan_on or assess_on
+    if expert_on:
+        st.markdown('<div class="side-label">Expert AI</div>', unsafe_allow_html=True)
+        persona = expert_persona_input()
+    else:
+        persona = st.session_state.get("expert_persona", settings.expert_persona)
     pbi_source = st.radio("Power BI data source", ["Live MySQL query", "Embedded rows"],
                           index=0 if settings.powerbi_source == "live" else 1, horizontal=True,
                           help="Live: the .pbip runs the generated SQL against MySQL when refreshed (needs MySQL "
@@ -216,7 +236,8 @@ with st.sidebar:
     agent.context_builder.llm = agent.answer_agent.llm      # memory summaries are prose: use the answer model
     agent.expert_agent = ExpertAgent(OllamaLLM(model=expert_model or answer_model or model), persona,
                                      briefing=agent.briefing.text if expert_on else "")
-    agent.expert = expert_on
+    agent.standardise = standardise_on
+    agent.expert_plan, agent.expert_assess = plan_on, assess_on
     if expert_on:
         with st.expander(f"Database briefing · {agent.briefing.name} · {agent.briefing.source}"):
             st.caption(str(agent.briefing.path) if agent.briefing.path else "auto-generated from the schema")
@@ -231,6 +252,13 @@ with st.sidebar:
     ok_llm, msg_llm = agent.llm.health()
     ok_ans, msg_ans = agent.answer_agent.llm.health()
     ok_exp, msg_exp = agent.expert_agent.llm.health() if expert_on else (True, "")
+    # load the models once per session so the first question does not pay 5-10 s of model loading
+    llms = {l.model: l for l in (agent.llm, agent.answer_agent.llm) + ((agent.expert_agent.llm,) if expert_on else ())}
+    warm_key = "warmed:" + "|".join(sorted(llms))
+    if ok_llm and ok_ans and ok_exp and not st.session_state.get(warm_key):
+        for l in llms.values():
+            l.warm()
+        st.session_state[warm_key] = True
     st.markdown(
         chip("Database" if ok_db else "Database offline", "ok" if ok_db else "err")
         + chip(f"SQL · {model}" if ok_llm else "Ollama offline", "ok" if ok_llm else "err")
@@ -278,10 +306,9 @@ with st.sidebar:
                 unsafe_allow_html=True)
 
     st.markdown('<div class="side-label">Conversation</div>', unsafe_allow_html=True)
-    remember = st.toggle("Remember conversation", value=True,
-                         help="After every answer a context-builder agent updates a compact memory (entities, "
-                              "filters, preferences, facts found). The next question is standardised against it, "
-                              "so follow-ups like 'how old is he?' resolve to concrete IDs.")
+    last = st.session_state.history[-1][1] if st.session_state.get("history") else None
+    if remember and last is not None and last.context_pending():
+        st.caption("memory update running in the background…")
     memory = next((r.context for _, r in reversed(st.session_state.get("history", [])) if r.context), None)
     if remember and memory and not memory.is_empty():
         with st.expander(f"Conversation memory · {memory.turns} turn{'s' if memory.turns != 1 else ''}"):
@@ -655,15 +682,20 @@ if question:
         intent = MODE_INTENT.get(mode)
         with st.status("Working…", expanded=True) as status:
             def live(s: Step) -> None:
+                l = s.details.get("llm")      # Ollama token stats, when the step called a model
+                tok = f"{l['prompt_tokens']}→{l['gen_tokens']} tok · {l['tok_per_s']} tok/s" if l else ""
                 status.markdown(f'<div class="step-head"><span class="step-num {TONE.get(s.status, "")}">'
                                 f'{s.index}</span><span class="step-title">{esc(s.name)}</span>'
-                                f'<span class="step-time">{s.duration_ms:.0f} ms</span></div>',
+                                f'<span class="step-time">{s.duration_ms:.0f} ms</span>'
+                                f'<span class="step-tok">{tok}</span></div>',
                                 unsafe_allow_html=True)
 
             history = [r for _, r in st.session_state.history] if remember else []
             result = agent.ask(question, on_step=live, force_intent=intent, force_model=force_model,
                                history=history, build_context=remember)
-            status.update(label="Done" if not result.error else "Finished with errors",
+            t = result.trace.timing()
+            status.update(label=(f"Done in {t['total_ms'] / 1000:.0f} s (LLM {t['llm_ms'] / 1000:.0f} s, "
+                                 f"{t['llm_calls']} calls)") if not result.error else "Finished with errors",
                           state="complete" if not result.error else "error", expanded=False)
         render_result(result)
     st.session_state.history.append((question, result))
