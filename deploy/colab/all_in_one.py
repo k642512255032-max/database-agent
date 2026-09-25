@@ -147,7 +147,10 @@ if not (os.path.exists("/usr/local/bin/ollama") or sh("which ollama")):
 os.environ["PATH"] = "/usr/local/bin:" + os.environ["PATH"]
 ok(f"binary {sh('which ollama')} ({sh('ollama --version 2>&1 | tail -1')})")
 if not wait("http://127.0.0.1:11434/api/tags", 2):
-    daemon("ollama serve", f"{LOG}/ollama.log")
+    # same server tuning as deploy/windows/ollama_env.ps1: 4 prompt-cache slots per model (the pipeline sends several
+    # prompt families to one model), models never unload, flash attention + q8_0 KV cache to halve KV memory
+    daemon("OLLAMA_NUM_PARALLEL=4 OLLAMA_KEEP_ALIVE=-1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve",
+           f"{LOG}/ollama.log")
     if not wait("http://127.0.0.1:11434/api/tags", 40):
         bad("ollama serve did not come up; log:\n" + sh(f"tail -20 {LOG}/ollama.log"))
         sys.exit(1)

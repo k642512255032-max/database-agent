@@ -62,6 +62,8 @@ class Settings:
     # Model names matching this regex get thinking switched on and the longer timeout.
     thinking_models: str = os.getenv("OLLAMA_THINKING_MODELS", r"qwen3|deepseek-r1|gpt-oss|magistral|phi4-reasoning")
     llm_think_timeout_s: int = int(os.getenv("LLM_THINK_TIMEOUT_S", "900"))
+    # How long Ollama keeps a model (and its prompt cache) loaded after a call; "-1" = forever. Sent with every request.
+    llm_keep_alive: str = os.getenv("LLM_KEEP_ALIVE", "30m")
     # Separate model for the answer agent (explanations + chart planning). Empty = same as OLLAMA_MODEL.
     # A general instruct model (e.g. qwen2.5:7b-instruct) writes far better prose than a coder model.
     answer_model: str = os.getenv("OLLAMA_ANSWER_MODEL", "")
@@ -102,8 +104,23 @@ class Settings:
     expert_assess: Optional[bool] = _on("EXPERT_ASSESS") if os.getenv("EXPERT_ASSESS") is not None else None  # step 7
     draw_charts: bool = _on("DRAW_CHARTS", "1")                     # step 9: chart planner (answer model)
     remember_conversation: bool = _on("REMEMBER_CONVERSATION", "1") # step 10: context builder (answer model)
+    # --- Speed (see README "Speed on a laptop") ------------------------------
+    # Charts, memory and the data-query summary only fill a JSON form: 0 = run them with thinking off (much faster
+    # on a thinking model), 1 = let the model reason first as well.
+    think_light_steps: bool = _on("THINK_LIGHT_STEPS", "0")
+    # step 1: trust the standardiser's task for plain data queries and skip the router model call
+    router_shortcut: bool = _on("ROUTER_SHORTCUT", "1")
+    # step 10: update the conversation memory in the background after the answer is shown
+    defer_memory_update: bool = _on("DEFER_MEMORY_UPDATE", "1")
     expert_audit_timeout_ms: int = int(os.getenv("EXPERT_AUDIT_TIMEOUT_MS", "20000"))   # per audit query (MySQL hint)
     expert_audit_sample_rows: int = int(os.getenv("EXPERT_AUDIT_SAMPLE_ROWS", "500"))    # rows fetched for sample checks
+
+    # --- Fine-tune agents (pages/3_Fine_tune_agents.py, agent/knowledge.py) ---
+    knowledge_dir: Path = Path(os.getenv("KNOWLEDGE_DIR", str(ROOT / "knowledge")))   # uploads + indexes per agent
+    knowledge_top_k: int = int(os.getenv("KNOWLEDGE_TOP_K", "3"))              # passages added to an agent's prompt
+    knowledge_max_chars: int = int(os.getenv("KNOWLEDGE_MAX_CHARS", "2400"))   # cap on the added passage text
+    knowledge_min_score: float = float(os.getenv("KNOWLEDGE_MIN_SCORE", "0.35"))  # keep passages scoring >= this share of the best
+    knowledge_query_chars: int = int(os.getenv("KNOWLEDGE_QUERY_CHARS", "3000"))  # tail of the prompt used as the search query
 
 
 settings = Settings()

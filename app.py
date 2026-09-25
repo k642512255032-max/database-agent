@@ -98,6 +98,7 @@ h1,h2,h3,h4,h5{letter-spacing:-.015em;}
 .step-num.err{background:var(--err-soft); color:var(--err-ink); border-color:var(--err-line);}
 .step-title{font-weight:620; font-size:.95rem; color:var(--ink);}
 .step-time{margin-left:auto; font-size:.72rem; color:var(--faint); font-variant-numeric:tabular-nums;}
+.step-tok{font-size:.72rem; color:var(--faint); font-variant-numeric:tabular-nums; white-space:nowrap;}
 .step-why{color:var(--muted); font-size:.83rem; line-height:1.5; margin:.5rem 0 .1rem;}
 .reasoning{margin:.75rem 0 .2rem; padding:.6rem .8rem; border-left:2px solid var(--brand);
   background:var(--brand-soft); border-radius:0 6px 6px 0; font-size:.84rem;
@@ -251,6 +252,13 @@ with st.sidebar:
     ok_llm, msg_llm = agent.llm.health()
     ok_ans, msg_ans = agent.answer_agent.llm.health()
     ok_exp, msg_exp = agent.expert_agent.llm.health() if expert_on else (True, "")
+    # load the models once per session so the first question does not pay 5-10 s of model loading
+    llms = {l.model: l for l in (agent.llm, agent.answer_agent.llm) + ((agent.expert_agent.llm,) if expert_on else ())}
+    warm_key = "warmed:" + "|".join(sorted(llms))
+    if ok_llm and ok_ans and ok_exp and not st.session_state.get(warm_key):
+        for l in llms.values():
+            l.warm()
+        st.session_state[warm_key] = True
     st.markdown(
         chip("Database" if ok_db else "Database offline", "ok" if ok_db else "err")
         + chip(f"SQL · {model}" if ok_llm else "Ollama offline", "ok" if ok_llm else "err")
@@ -298,6 +306,9 @@ with st.sidebar:
                 unsafe_allow_html=True)
 
     st.markdown('<div class="side-label">Conversation</div>', unsafe_allow_html=True)
+    last = st.session_state.history[-1][1] if st.session_state.get("history") else None
+    if remember and last is not None and last.context_pending():
+        st.caption("memory update running in the background…")
     memory = next((r.context for _, r in reversed(st.session_state.get("history", [])) if r.context), None)
     if remember and memory and not memory.is_empty():
         with st.expander(f"Conversation memory · {memory.turns} turn{'s' if memory.turns != 1 else ''}"):
@@ -671,15 +682,20 @@ if question:
         intent = MODE_INTENT.get(mode)
         with st.status("Working…", expanded=True) as status:
             def live(s: Step) -> None:
+                l = s.details.get("llm")      # Ollama token stats, when the step called a model
+                tok = f"{l['prompt_tokens']}→{l['gen_tokens']} tok · {l['tok_per_s']} tok/s" if l else ""
                 status.markdown(f'<div class="step-head"><span class="step-num {TONE.get(s.status, "")}">'
                                 f'{s.index}</span><span class="step-title">{esc(s.name)}</span>'
-                                f'<span class="step-time">{s.duration_ms:.0f} ms</span></div>',
+                                f'<span class="step-time">{s.duration_ms:.0f} ms</span>'
+                                f'<span class="step-tok">{tok}</span></div>',
                                 unsafe_allow_html=True)
 
             history = [r for _, r in st.session_state.history] if remember else []
             result = agent.ask(question, on_step=live, force_intent=intent, force_model=force_model,
                                history=history, build_context=remember)
-            status.update(label="Done" if not result.error else "Finished with errors",
+            t = result.trace.timing()
+            status.update(label=(f"Done in {t['total_ms'] / 1000:.0f} s (LLM {t['llm_ms'] / 1000:.0f} s, "
+                                 f"{t['llm_calls']} calls)") if not result.error else "Finished with errors",
                           state="complete" if not result.error else "error", expanded=False)
         render_result(result)
     st.session_state.history.append((question, result))

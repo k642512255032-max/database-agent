@@ -8,3 +8,6 @@ models/manifest.json
 *.bak
 body2.txt
 dashboards/
+
+# Fine-tune agents page: uploaded documents, indexes, datasets (may be private)
+knowledge/

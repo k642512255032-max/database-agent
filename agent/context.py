@@ -21,7 +21,7 @@ import pandas as pd
 
 from . import prompts
 from .config import settings
-from .llm import OllamaLLM
+from .llm import OllamaLLM, light_llm
 from .trace import Trace
 
 if TYPE_CHECKING:  # avoid a circular import at runtime
@@ -103,12 +103,14 @@ class ContextBuilder:
                         "Fold this turn into the conversation memory (entities, filters, preferences, facts) "
                         "so later questions can refer back to it.") as s:
             new = None
+            llm = light_llm(self.llm)      # folding a turn into the memory is form-filling, not reasoning
+            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not self.llm else "on")
             try:
-                out = self.llm.chat_json(prompts.CONTEXT_SYSTEM,
-                                         prompts.context_user(json.dumps(ctx.to_dict(), ensure_ascii=False), turn),
-                                         prompts.CONTEXT_SCHEMA)
+                out = llm.chat_json(prompts.CONTEXT_SYSTEM,
+                                    prompts.context_user(json.dumps(ctx.to_dict(), ensure_ascii=False), turn),
+                                    prompts.CONTEXT_SCHEMA)
                 new = ConversationContext.from_dict(out)
-                s.add_thinking(self.llm)
+                s.add_thinking(llm)
                 s.reasoning = out.get("reasoning")
             except Exception as exc:
                 s.status = "warning"

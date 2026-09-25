@@ -27,7 +27,6 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 ID_PATTERN = re.compile(r"(^id$|_id$|^id_|uuid|guid)", re.I)
 
-
 class AutoFeatureEngineer(BaseEstimator, TransformerMixin):
     def __init__(self, max_onehot: int = 15, skew_threshold: float = 1.0,
                  drop_id_like: bool = True, text_unique_ratio: float = 0.5):
