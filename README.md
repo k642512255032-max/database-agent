@@ -1,48 +1,52 @@
-# Local Data Agent: English → SQL → Statistics / ML, fully local
+# Local Data Agent: a multi-agent analyst for MySQL, fully local
 
-Ask your **MySQL** database questions in plain English. The agent writes the SQL, runs it
-safely, and when needed runs **statistical tests** or **already-trained ML models**
-(Decision Tree, Random Forest, KNN, K-Means, PCA, Isolation Forest, DBSCAN) with **automatic
-feature engineering**. **Every step is shown**: what it did, why, the model's reasoning, and the
-inputs and outputs.
+Ask your **MySQL** database questions in plain English. A team of small local AI agents understands the request,
+plans the data, writes and safely runs the SQL, runs **statistical tests** or **pre-trained ML models** when the
+question needs them, reviews the result like a domain expert, and explains it with charts. **Every step is shown**:
+what each agent did, why, its reasoning, and its inputs and outputs.
 
-The LLM is a lightweight **Qwen2.5-Coder** model served by **Ollama**. Nothing leaves your machine.
+All models run on your machine through **Ollama** (default `qwen2.5-coder:3b` + `qwen3:4b`). No data leaves it.
+
+## Features
+
+| Feature | What you get |
+|---|---|
+| **Plain-English data queries** | SQL written, validated (read-only, single `SELECT`, real tables and columns, `LIMIT`) and self-repaired on error; follow-ups like *"how old is he?"* resolved from conversation memory |
+| **Statistics** | describe, correlation, t-test, ANOVA, chi-square, normality, linear and logistic regression, computed by scipy / statsmodels with rule-based interpretation, never guessed by the LLM |
+| **Machine learning** | Decision Tree, Random Forest, KNN, K-Means, PCA, Isolation Forest, DBSCAN, with automatic feature engineering and per-prediction explanations |
+| **Answers and charts** | Answer, key findings, interpretation and caveats built from computed facts; bar / line / scatter / histogram / box charts checked against the real columns |
+| **Exports** | CSV, Excel, PNG per chart, and a **Power BI project** (`.pbip`) with the table, the charts and a live MySQL query |
+| **Dashboards** | Describe a dashboard in one sentence; the agent designs the widgets, runs the SQL, renders HTML / CSS / JS, previews it and publishes it to **Netlify** on your approval, with refresh and unpublish |
+| **Expert AI** | A specialist briefed on your database plans the data before the SQL and reviews the result after it: quality score, its own answer, insights and business advice; plus a whole-table **Expert audit** page |
+| **Fine-tune agents** | Upload documents per agent (PDF, Word, Markdown, SQL, CSV); each agent retrieves its own knowledge (BM25), or trains a LoRA model on Colab and plugs it in |
+| **Per-agent switches** | Turn each agent on or off from the sidebar; speed settings (thinking off for light steps, router shortcut, background memory, keep-alive) for CPU-only laptops |
+| **Free hosting for demos** | One Colab notebook runs MySQL, Ollama, the models and the app on a free T4 GPU and prints a public link |
+
+## How a question flows through the agents
 
 ```
  "Predict churn for premium customers in Hanoi"
         │
- 0 Standardise request ─ LLM ─▶ standalone question + filters (plan = premium, city = Hanoi), metrics, sort, limit;
-                                references like "he" / "that city" resolved from the conversation memory
- 1 Understand request ── LLM ─▶ intent = machine_learning, model = churn_random_forest
-2 Expert data plan ── Expert ▶ (optional) the expert, briefed on the database, decides which tables / columns / filters
-                                answer the request and writes the order for the SQL writer
- 2b Select tables ──────────▶ from the expert's plan (lexical schema linking as fallback, scores shown)
- 3 Generate SQL ──────── LLM ─▶ SELECT * FROM customer_features WHERE plan='premium' AND city='Hanoi'
-                                (the "code agent": its prompt carries the expert's data order)
- 4 Validate SQL ─────────────▶ sqlglot: single read-only SELECT, real tables/columns, LIMIT
- 5 Execute SQL ──────────────▶ read-only MySQL session; on error the LLM repairs it (≤3 tries)
- 6 Load model → Feature engineering → Inference → Explanations
- 7 Expert assessment ─ Expert ▶ (optional) data-quality verdict, the expert's own answer, insights, advice
- 8 Answer agent ── 2nd LLM ─▶ answer / key findings / interpretation / caveats, built from the computed facts
-                                AND the expert's assessment
- 9 Chart planner ─ 2nd LLM ─▶ chart spec (bar, line, scatter, histogram, box) validated against the real columns
- 10 Context builder ─ 2nd LLM ▶ updates the conversation memory (entities, filters, preferences, facts found)
+ 0 Understanding agent ── coder ──▶ standalone question + filters (plan = premium, city = Hanoi), metrics, sort,
+                                    limit; references like "he" / "that city" resolved from the conversation memory
+ 1 Router agent ───────── coder ──▶ intent = machine_learning, model = churn_random_forest
+                                    (skipped for plain look-ups the Understanding agent already classified)
+ 2 Expert agent: plan ─ thinking ─▶ which tables / columns / filters answer the request + an order for the SQL writer
+ 2b Select tables ─────────────────▶ from the expert's plan (lexical schema linking as fallback, scores shown)
+ 3 SQL writer agent ───── coder ──▶ SELECT * FROM customer_features WHERE plan='premium' AND city='Hanoi'
+ 4 Validate SQL ───────────────────▶ sqlglot: single read-only SELECT, real tables/columns, LIMIT
+ 5 Execute SQL ────────────────────▶ read-only MySQL session; on error the SQL writer repairs it (≤3 tries)
+ 6 Statistics or ML tools ─────────▶ scipy / statsmodels, or load model → feature engineering → inference → explanations
+ 7 Expert agent: review ─ thinking ▶ data-quality verdict, the expert's own answer, insights, advice
+ 8 Answer & Charts agent ─ thinking ▶ answer / key findings / interpretation / caveats + chart specs
+ 9 Memory agent ───────── thinking ▶ updates the conversation memory in the background after the answer is shown
 ```
 
-Two kinds of model do the work: a **coder** model writes SQL (`OLLAMA_MODEL`), and a **thinking** model explains the
-results, plans the charts and acts as the Expert AI (`OLLAMA_ANSWER_MODEL` / `OLLAMA_EXPERT_MODEL`, default
-`qwen3:4b`; `qwen3:8b` is stronger and ~2x slower). Thinking models reason before they answer - Ollama returns that reasoning separately and the trace
-shows it under *Model's thinking* - which helps with abstract or judgement questions; `qwen2.5:7b-instruct` still
-works as a faster non-thinking alternative. Plain data queries skip the
-prose and show the SQL and the result table directly.
-
-Results can be downloaded as **CSV** or **Excel** (statistics tables included as extra sheets), every chart
-as a **PNG** — rendered locally with `vl-convert`, so nothing leaves the machine — and the whole result as a
-**Power BI project** (table + the planned charts + the SQL) that opens in Power BI Desktop.
-
-A second page, **Dashboards**, turns a plain-English description into a hosted web dashboard: the agent designs the
-widgets, writes and runs the SQL, generates the HTML / CSS / JavaScript, previews it, and on your approval publishes
-it to Netlify.
+A **coder** model writes SQL (`OLLAMA_MODEL`, default `qwen2.5-coder:3b`); a **thinking** model explains the results,
+plans the charts and acts as the Expert AI (`OLLAMA_ANSWER_MODEL` / `OLLAMA_EXPERT_MODEL`, default `qwen3:4b`;
+`qwen3:8b` is stronger and about 2x slower). Thinking models reason before they answer; the trace shows that
+reasoning under *Model's thinking*. Every agent falls back to a rule when its model call fails, so one bad call never
+ends the turn.
 
 ## 1. Install
 
@@ -227,7 +231,21 @@ what makes a small local model usable here. The deterministic findings are alway
 * **Persona**: the sidebar box *Domain & goals* (e.g. *"HR analytics; we care about pay equity and retention"*) is
   injected into every expert prompt so the advice is business-specific. `EXPERT_PERSONA` sets the default.
 * **Model**: `OLLAMA_EXPERT_MODEL` (empty = the answer model). Use a **thinking** model - `qwen3:4b` by default,
-  `qwen3:8b` or `qwen3:14b` if you have the memory and patience; its reasoning is recorded in the trace. Nothing is fine-tuned.
+  `qwen3:8b` or `qwen3:14b` if you have the memory and patience; its reasoning is recorded in the trace. Documents or a fine-tuned model can be added on the *Fine-tune agents* page.
+
+### Fine-tune agents (`agent/knowledge.py`, `pages/3_Fine_tune_agents.py`, `deploy/colab/finetune_agent.py`)
+Pick an agent (Understanding, Router, SQL writer, Answer & charts, Expert AI, Memory), upload documents
+(PDF, Word, Markdown, text, SQL, CSV) and press **Start fine-tuning**. Each agent learns only from its own documents.
+* **Knowledge learning** (runs locally, seconds, no GPU): the documents are split into passages and indexed (BM25).
+  On every call, the passages most relevant to the prompt are appended to that agent's system prompt. The trace shows
+  them under `knowledge_used`, and section 2 of the page previews what a question would retrieve.
+* **LoRA training** (optional, GPU): **Generate training dataset** has an LLM write input → output examples from each
+  passage, in the agent's own format. Uploaded `.jsonl` files of `{"input", "output"}` lines are added as hand-written
+  examples. Train it on the Colab host with `python deploy/colab/finetune_agent.py --data <agent>_train.jsonl --base
+  qwen2.5-coder:3b --name <agent>-ft` (Unsloth LoRA → GGUF → `ollama create`), then enter `<agent>-ft` on the page:
+  that agent's calls go to the fine-tuned model.
+* Everything lives in `knowledge/<agent>/` (git-ignored). `KNOWLEDGE_TOP_K`, `KNOWLEDGE_MAX_CHARS` and
+  `KNOWLEDGE_MIN_SCORE` tune the retrieval.
 
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),
@@ -300,12 +318,59 @@ Simplest of all - one cell in any fresh T4 notebook (installs, verifies each ste
 | `DASHBOARD_MAX_WIDGETS`, `DASHBOARD_ROWS_PER_WIDGET`, `DASHBOARDS_DIR` | 8, 500, `./dashboards` |
 | `OLLAMA_EXPERT_MODEL`, `EXPERT_PERSONA`, `EXPERT_REVIEWS` | *(answer model)*, *(empty)*, 1 |
 | `EXPERT_AUDIT_TIMEOUT_MS`, `EXPERT_AUDIT_SAMPLE_ROWS` | 20000, 500 |
+| `LLM_KEEP_ALIVE`, `THINK_LIGHT_STEPS`, `ROUTER_SHORTCUT`, `DEFER_MEMORY_UPDATE` | `30m`, 0, 1, 1 — see section 8 |
 
 ## 7. Tests
 ```bash
 pytest -q tests/     # uses a scripted fake LLM against the seeded MySQL, so Ollama is not needed
 ```
-Tests cover the SQL guard, the read-only session, SQL self-repair, t-test and regression, and all 7 ML algorithms.
+Tests cover the SQL guard, the read-only session, SQL self-repair, t-test and regression, all 7 ML algorithms, the expert plan and review, dashboards, Power BI export, per-agent knowledge and the speed settings.
+
+## 8. Speed on a laptop (no GPU)
+
+With every agent on, one question is **8 Ollama calls in a row** (standardise, route, expert plan, SQL, expert
+assessment, answer, charts, memory), five of them on the thinking model. On a CPU-only laptop (Ryzen AI 7 350,
+24 GB, Ollama 0.34, `qwen2.5-coder:3b` + `qwen3:4b`) the numbers that matter were measured as:
+
+| What | Measured | Consequence |
+|---|---|---|
+| `qwen3:4b` answering a trivial JSON prompt **with** thinking | 51 s (573 reasoning tokens at 13 tok/s) | thinking, not prompt size, is the cost |
+| the same prompt **without** thinking | 0.8 s | |
+| a 2 650-token prompt (briefing + schema), cold | 54 s at ~50 tok/s | every uncached expert call pays this |
+| the same prompt again, prefix cached | 0.8 s | keep the cache alive and give it enough slots |
+| loading a model after it was unloaded | 5-6 s per model | keep the models resident |
+
+What the app does about it (all on by default, all switchable in `.env`):
+
+| Setting | Effect |
+|---|---|
+| `THINK_LIGHT_STEPS=0` | Charts, conversation memory and the plain-English summary of a data query only fill a JSON form, so they run the answer model with thinking **off** (~40 s → a few seconds each). The expert plan, the expert assessment and the full analyst answer for statistics / ML keep thinking - that reasoning is shown in the trace. `1` = old behaviour. |
+| `ROUTER_SHORTCUT=1` | When the standardiser already classified the request as a plain data task (lookup, list, count, aggregate, rank, compare, trend) and no statistics / ML words appear, the router model call is skipped. |
+| `DEFER_MEMORY_UPDATE=1` | The conversation memory is updated in a background thread after the answer is on screen; the next question waits for it only if it is still running. |
+| `LLM_KEEP_ALIVE=30m` | Sent with every request: Ollama keeps the model (and its prompt cache) loaded for 30 minutes instead of 5. The models are also loaded once when the app starts. |
+
+Every step in the *Step-by-step* tab now shows the Ollama counts (`prompt→generated tokens · tok/s`) and the status
+line shows `Done in N s (LLM M s, K calls)`, so you can see where the seconds go.
+
+**Server side (Windows):** Ollama itself needs two changes it cannot get from the app. Run
+`deploy\windows\ollama_env.ps1` once (it sets user environment variables and restarts Ollama):
+
+* `OLLAMA_NUM_PARALLEL=4` - each slot has its own prompt cache; the pipeline sends several prompt families to the
+  same model, so with one slot the 2 000-token briefing + schema prefix is re-evaluated on almost every call.
+* `OLLAMA_KEEP_ALIVE=30m`, `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0` (halves KV-cache memory).
+* `-Igpu` adds `OLLAMA_IGPU_ENABLE=1`: Ollama drops integrated GPUs by default; this tries the Radeon iGPU through
+  Vulkan. It shares the CPU's memory bus, so decode speed may not change - measure. `-Rocm` tries
+  `HSA_OVERRIDE_GFX_VERSION=11.5.1` instead (gfx1152 → gfx1151 kernels). `-Reset` removes everything again.
+
+**Measure, do not guess:**
+```bash
+python bench_agent.py --json before.json            # 3 questions through the full pipeline, per-step tokens and ms
+deploy\windows\ollama_env.ps1                       # then bench again; then try -Igpu and bench again
+python bench_agent.py --json after.json
+```
+Keep the iGPU flag only if it is clearly faster. Do not run `ollama run …` in a terminal while the app is in use:
+a different context size reloads the model and empties every cache slot. The free real-GPU option is the Colab
+host of section 4b, which starts Ollama with the same settings.
 
 ## Project layout
 ```
@@ -314,6 +379,8 @@ pages/1_Dashboards.py   Dashboards page: describe -> build -> preview -> publish
 pages/2_Expert_audit.py Expert audit page: profile a table -> findings -> expert report
 briefings/              database briefings for the expert (employees.md, shop.md; add <database>.md for yours)
 deploy/colab/           free temporary hosting: bootstrap.sh + serve.sh + Host_on_Colab.ipynb
+deploy/windows/         ollama_env.ps1: Ollama server tuning on Windows (cache slots, keep-alive, optional iGPU)
+bench_agent.py          end-to-end benchmark: per-step ms and token counts for a list of questions (section 8)
 dashboard/  spec.py  prompts.py  builder.py (design + fetch + render)  render.py (HTML/CSS/JS bundle)
             netlify.py (zip deploy)  store.py (dashboards/*.json)  assets/chart.umd.js (vendored Chart.js)
 train_models.py         one-off training → models/*.joblib + manifest.json
@@ -327,7 +394,7 @@ agent/  config.py  db.py (schema, linking, SQL guard)  llm.py (Ollama JSON-schem
         data_quality.py (quality toolkit + audit SQL)
 ml/     features.py (auto FE)  registry.py (bundles)  inference.py (predict + explain)
 sample_data/seed_mysql.py   demo database
-tests/  test_agent.py  test_export.py  test_powerbi.py  test_dashboard_*.py  test_data_quality.py  test_expert_*.py  test_briefing.py
+tests/  test_agent.py  test_export.py  test_powerbi.py  test_dashboard_*.py  test_data_quality.py  test_expert_*.py  test_briefing.py  test_speed.py
 ```
 
 ## Tips for small models
