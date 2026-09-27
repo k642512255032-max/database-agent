@@ -113,3 +113,9 @@ def test_failed_call_still_shows_what_was_sent(monkeypatch):
             OllamaLLM("qwen2.5:7b").chat("sys", "user")
     call = trace.steps[0].details["llm_calls"][0]
     assert call["user"] == "user" and "refused" in call["error"] and call["response"] == ""
+
+
+@pytest.mark.parametrize("value, sent", [("-1", -1), ("300", 300), ("30m", "30m"), (" -1 ", -1)])
+def test_keep_alive_numbers_are_sent_as_json_numbers(value, sent):
+    from agent.config import _keep_alive
+    assert _keep_alive(value) == sent      # the string "-1" makes Ollama answer HTTP 400
