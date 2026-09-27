@@ -19,6 +19,7 @@ import pandas as pd
 
 from .config import settings
 from .llm import OllamaLLM, light_llm
+from .prompt_store import prompt
 from .trace import Trace
 
 if TYPE_CHECKING:  # avoid a circular import at runtime
@@ -137,7 +138,8 @@ class AnswerAgent:
     # =============================================================== answer
     def compose(self, res: "AgentResult", trace: Trace, brief: bool = False) -> str:
         """Full analyst answer, or with brief=True a short plain-English summary of a data query."""
-        system, schema = (DATA_SUMMARY_SYSTEM, DATA_SUMMARY_SCHEMA) if brief else (ANSWER_SYSTEM, ANSWER_SCHEMA)
+        system, schema = ((prompt("answer.summary", DATA_SUMMARY_SYSTEM), DATA_SUMMARY_SCHEMA) if brief
+                          else (prompt("answer.full", ANSWER_SYSTEM), ANSWER_SCHEMA))
         with trace.step("Summarise the result (answer agent)" if brief else "Compose the answer (answer agent)",
                         "A second model describes what the result table shows, in plain English." if brief else
                         "A second model turns the computed facts into a coherent explanation: answer, "
@@ -174,7 +176,7 @@ class AnswerAgent:
                   column_profile=profile_text(prof))
             specs: list[dict] = []
             try:
-                out = llm.chat_json(CHART_SYSTEM, f"Question: {res.standalone_question}\n\n"
+                out = llm.chat_json(prompt("answer.charts", CHART_SYSTEM), f"Question: {res.standalone_question}\n\n"
                                     f"Result table profile ({len(df)} rows):\n{profile_text(prof)}\nJSON:",
                                     CHART_SCHEMA)
                 s.add_thinking(llm)

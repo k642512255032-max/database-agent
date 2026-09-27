@@ -16,6 +16,7 @@ from typing import Any, Optional
 import requests
 
 from .config import settings
+from .trace import record_llm_call
 
 
 class LLMError(RuntimeError):
@@ -33,6 +34,7 @@ class OllamaLLM:
         self.think = is_thinking_model(self.model) if think is None else think
         self.last_thinking: str = ""          # reasoning of the last call (thinking models only)
         self.last_stats: dict[str, Any] = {}  # Ollama timings / token counts of the last call (nanoseconds)
+        self.last_request: dict[str, Any] = {}  # what the last call sent and got back, for the trace
 
     def light(self) -> "OllamaLLM":
         """The same model with thinking off: for steps that only fill a JSON form (charts, memory, brief summary)."""
@@ -77,14 +79,21 @@ class OllamaLLM:
         if self.think:
             payload["think"] = True     # Ollama >= 0.9: reasoning comes back in message.thinking
         timeout = settings.llm_think_timeout_s if self.think else settings.llm_timeout_s
+        # recorded before the call so a failed step still shows what was sent
+        self.last_request = {"model": self.model, "thinking": "on" if self.think else "off",
+                             "system": system, "user": user, "response": ""}
+        self.last_thinking = ""
+        record_llm_call(self.last_request)
         try:
             r = requests.post(f"{self.host}/api/chat", json=payload, timeout=timeout)
             r.raise_for_status()
         except requests.RequestException as exc:
+            self.last_request["error"] = str(exc)
             raise LLMError(f"Ollama request failed: {exc}") from exc
         body = r.json()
         message = body["message"]
         self.last_thinking = (message.get("thinking") or "").strip()
+        self.last_request.update(response=message["content"], thinking_text=self.last_thinking)
         self.last_stats = {k: body.get(k, 0) for k in ("total_duration", "load_duration", "prompt_eval_count",
                                                       "prompt_eval_duration", "eval_count", "eval_duration")}
         return message["content"]

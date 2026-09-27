@@ -9,10 +9,7 @@ LOG_DIR="${LOG_DIR:-/tmp/agent-logs}"
 mkdir -p "$LOG_DIR"
 
 # Ollama must be up (bootstrap starts it; a notebook restart may have killed it)
-if ! curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  setsid nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 < /dev/null &
-  for i in $(seq 1 30); do curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
-fi
+bash "$APP_DIR/deploy/colab/start_ollama.sh"
 mysqladmin ping --silent 2>/dev/null || service mysql start >/dev/null 2>&1 || true
 
 if curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
@@ -30,6 +27,11 @@ cd "$APP_DIR"
 setsid nohup python -m streamlit run app.py --server.headless true --server.port "$PORT" --server.address 0.0.0.0 \
   --browser.gatherUsageStats false > "$LOG_DIR/streamlit.log" 2>&1 &
 for i in $(seq 1 60); do curl -fs "http://127.0.0.1:$PORT/_stcore/health" >/dev/null 2>&1 && break; sleep 1; done
+
+# load every model the .env names onto the GPU now, so the first question in the demo does not wait for it
+for m in $(grep -E '^OLLAMA_(ANSWER_|EXPERT_)?MODEL=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2 | sort -u); do
+  curl -fs -m 300 http://127.0.0.1:11434/api/chat -d "{\"model\": \"$m\", \"messages\": [], \"keep_alive\": -1}"     >/dev/null && echo "Loaded on the GPU: $m" || echo "Could not load $m (see $LOG_DIR/ollama.log)"
+done
 
 if ! command -v cloudflared >/dev/null 2>&1; then
   echo "cloudflared missing - installing"
@@ -58,7 +60,7 @@ echo
 echo "======================================================================"
 if [ -n "$URL" ]; then
   echo "  Share this link:  $URL"
-  echo "  (first answer is slow while the models load into the GPU; logs in $LOG_DIR)"
+  echo "  (models are already loaded on the GPU; logs in $LOG_DIR)"
 else
   echo "  Tunnel URL not found. cloudflared log:"
   tail -25 "$LOG_DIR/cloudflared.log" || true

@@ -140,3 +140,24 @@ def test_pipeline_gives_each_agent_only_its_own_knowledge(kb, monkeypatch):
     assert "(dictionary)" in sql and "(hr_glossary)" not in sql
     steps = {s.name: s for s in res.trace.steps}
     assert steps["Standardise the request"].details["knowledge_used"]
+
+
+def test_recorded_call_names_the_agent_and_the_model_it_really_used(kb, monkeypatch):
+    import requests
+
+    class Reply:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"message": {"content": '{"a": 1}'}}
+
+    monkeypatch.setattr(requests, "post", lambda url, json=None, timeout=None: Reply())
+    llm = KnowledgeLLM(OllamaLLM("qwen2.5-coder:7b"), kb, "understanding")
+    kb.set_model("understanding", "qwen2.5:3b")
+    trace = Trace("q")
+    with trace.step("s", "why"):
+        llm.chat_json("sys", "user", {})
+    call = trace.steps[0].details["llm_calls"][0]
+    assert call["agent"] == "Understanding" and call["model"] == "qwen2.5:3b"
+    assert call["model_source"] == "Agent settings override"

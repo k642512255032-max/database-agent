@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot setup of the whole stack on a free GPU notebook VM (Google Colab, Kaggle):
 #   MySQL 8 + the "employees" sample database + feature view/table + trained models,
-#   Ollama on the GPU with the SQL model and the thinking model,
+#   Ollama on the GPU with the SQL model and the answer model,
 #   the app's Python dependencies and .env.
 # Idempotent: re-running skips what is already done. Takes ~8-12 minutes the first time
 # (most of it downloading ~10 GB of models).
@@ -11,8 +11,11 @@ APP_DIR="${APP_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MYSQL_ROOT_PW="${MYSQL_ROOT_PW:-rootpw}"
 RO_USER="${RO_USER:-agent_ro}"
 RO_PW="${RO_PW:-agent_ro_pw}"
-SQL_MODEL="${SQL_MODEL:-qwen2.5-coder:3b}"
-THINK_MODEL="${THINK_MODEL:-qwen3:4b}"
+# Default pair for a T4 (16 GB): both 7B models stay loaded on the GPU together (~11 GB with their caches).
+# The answer model is a plain instruct model on purpose: a thinking model (qwen3) writes a long hidden
+# reasoning before every answer, which is the slowest part of a turn.
+SQL_MODEL="${SQL_MODEL:-qwen2.5-coder:7b}"
+ANSWER_MODEL="${ANSWER_MODEL:-${THINK_MODEL:-qwen2.5:7b-instruct}}"
 TEST_DB_DIR="${TEST_DB_DIR:-/tmp/test_db}"
 LOG_DIR="${LOG_DIR:-/tmp/agent-logs}"
 mkdir -p "$LOG_DIR"
@@ -60,9 +63,10 @@ cat > "$APP_DIR/.env" <<EOF
 DATABASE_URL=mysql+pymysql://$RO_USER:$RO_PW@127.0.0.1:3306/employees
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=$SQL_MODEL
-OLLAMA_ANSWER_MODEL=$THINK_MODEL
-OLLAMA_EXPERT_MODEL=$THINK_MODEL
+OLLAMA_ANSWER_MODEL=$ANSWER_MODEL
+OLLAMA_EXPERT_MODEL=$ANSWER_MODEL
 LLM_NUM_CTX=8192
+LLM_KEEP_ALIVE=-1
 LLM_TEMPERATURE=0
 MAX_ROWS=1000
 EXPERT_REVIEWS=${EXPERT:-0}
@@ -80,11 +84,8 @@ if ! command -v ollama >/dev/null 2>&1; then
   rm -rf /usr/local/lib/ollama && tar --use-compress-program=unzstd -C /usr/local -xf /tmp/ollama.tar.zst && chmod +x /usr/local/bin/ollama
 fi
 export PATH="/usr/local/bin:$PATH"
-if ! curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  setsid nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 < /dev/null &
-  for i in $(seq 1 30); do curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
-fi
-for m in "$SQL_MODEL" "$THINK_MODEL"; do
+bash "$APP_DIR/deploy/colab/start_ollama.sh"
+for m in "$SQL_MODEL" "$ANSWER_MODEL"; do
   ollama list 2>/dev/null | grep -q "^$m" || { say "Pulling $m"; ollama pull "$m"; }
 done
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo "(no NVIDIA GPU visible - Ollama will run on CPU, slowly)"

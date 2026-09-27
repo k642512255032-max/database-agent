@@ -19,6 +19,7 @@ All models run on your machine through **Ollama** (default `qwen2.5-coder:3b` + 
 | **Dashboards** | Describe a dashboard in one sentence; the agent designs the widgets, runs the SQL, renders HTML / CSS / JS, previews it and publishes it to **Netlify** on your approval, with refresh and unpublish |
 | **Expert AI** | A specialist briefed on your database plans the data before the SQL and reviews the result after it: quality score, its own answer, insights and business advice; plus a whole-table **Expert audit** page |
 | **Fine-tune agents** | Upload documents per agent (PDF, Word, Markdown, SQL, CSV); each agent retrieves its own knowledge (BM25), or trains a LoRA model on Colab and plugs it in |
+| **Agent settings** | One tab to see and edit every agent's system prompts, model and knowledge; changes are saved and apply from the next question, with one-click reset to the default |
 | **Per-agent switches** | Turn each agent on or off from the sidebar; speed settings (thinking off for light steps, router shortcut, background memory, keep-alive) for CPU-only laptops |
 | **Free hosting for demos** | One Colab notebook runs MySQL, Ollama, the models and the app on a free T4 GPU and prints a public link |
 
@@ -246,6 +247,18 @@ Pick an agent (Understanding, Router, SQL writer, Answer & charts, Expert AI, Me
   that agent's calls go to the fine-tuned model.
 * Everything lives in `knowledge/<agent>/` (git-ignored). `KNOWLEDGE_TOP_K`, `KNOWLEDGE_MAX_CHARS` and
   `KNOWLEDGE_MIN_SCORE` tune the retrieval.
+
+### Agent settings (`pages/4_Agent_settings.py`, `agent/prompt_store.py`, `agent/agent_catalog.py`)
+Pick an agent to see, in one place, everything that shapes it, and change any of it:
+* **Model**: pick a pulled Ollama model (or type a name) for this agent alone. It is stored in
+  `knowledge/<agent>/model.txt`, the same place the Fine-tune page uses, and wins over the chat sidebar's model boxes.
+* **Prompts**: every system prompt the agent sends (16 in total, e.g. the SQL writer and SQL repair, the expert's
+  plan, assessment and audit). Edit, **Save prompt**, and the next call uses it; **Reset to default** undoes it and
+  *Changes vs default* shows a diff. Placeholders such as `{dialect}` and `{persona}` must stay (the page refuses a
+  save without them); literal braces in those prompts are written `{{ }}`. Edits are saved to
+  `knowledge/prompts.json` (`AGENT_PROMPTS_FILE`); a missing or broken entry falls back to the built-in prompt.
+  The JSON output schema of each step is not editable, so an edit cannot change the fields an agent returns.
+* **Knowledge**: the agent's documents, with upload and re-index; probing and LoRA training stay on the Fine-tune page.
 
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import threading
 
 import altair as alt
 import pandas as pd
@@ -13,6 +14,7 @@ from agent.config import settings
 from agent.expert_agent import ExpertAgent, review_markdown
 from agent.export import EXCEL_MAX_ROWS, chart_to_png, export_filenames, to_csv_bytes, to_xlsx_bytes
 from agent.powerbi import to_pbip_bytes
+from agent.knowledge import AGENTS
 from agent.llm import OllamaLLM
 from agent.orchestrator import AgentResult
 from agent.trace import Step
@@ -236,6 +238,7 @@ with st.sidebar:
     agent.context_builder.llm = agent.answer_agent.llm      # memory summaries are prose: use the answer model
     agent.expert_agent = ExpertAgent(OllamaLLM(model=expert_model or answer_model or model), persona,
                                      briefing=agent.briefing.text if expert_on else "")
+    agent.wrap_agents()                        # knowledge + model overrides (Agent settings / Fine-tune agents pages)
     agent.standardise = standardise_on
     agent.expert_plan, agent.expert_assess = plan_on, assess_on
     if expert_on:
@@ -248,26 +251,37 @@ with st.sidebar:
     agent.charts = charts_on
     agent.summarise_data = summary_on
 
+    # the model each agent really calls: an Agent settings override wins over the boxes above
+    st.session_state["chat_models"] = {"understanding": model, "router": model, "sql": model,
+                                       "answer": answer_model or model, "memory": answer_model or model,
+                                       "expert": expert_model or answer_model or model}
+    active = {"understanding": standardise_on, "router": True, "sql": True, "answer": True,
+              "expert": expert_on, "memory": remember}
+    agent_llms = {k: l for k, l in agent.agent_llms().items() if active[k]}
+    in_use = agent.models_in_use()
     ok_db, msg_db = agent.db.ping()
-    ok_llm, msg_llm = agent.llm.health()
-    ok_ans, msg_ans = agent.answer_agent.llm.health()
-    ok_exp, msg_exp = agent.expert_agent.llm.health() if expert_on else (True, "")
-    # load the models once per session so the first question does not pay 5-10 s of model loading
-    llms = {l.model: l for l in (agent.llm, agent.answer_agent.llm) + ((agent.expert_agent.llm,) if expert_on else ())}
-    warm_key = "warmed:" + "|".join(sorted(llms))
-    if ok_llm and ok_ans and ok_exp and not st.session_state.get(warm_key):
-        for l in llms.values():
-            l.warm()
-        st.session_state[warm_key] = True
-    st.markdown(
-        chip("Database" if ok_db else "Database offline", "ok" if ok_db else "err")
-        + chip(f"SQL · {model}" if ok_llm else "Ollama offline", "ok" if ok_llm else "err")
-        + chip(f"Answer · {agent.answer_agent.llm.model}" if ok_ans else "Answer model missing",
-               "ok" if ok_ans else "err")
-        + (chip(f"Expert · {agent.expert_agent.llm.model}" if ok_exp else "Expert model missing",
-                "ok" if ok_exp else "err") if expert_on else ""),
-        unsafe_allow_html=True)
-    for ok, msg in ((ok_db, msg_db), (ok_llm, msg_llm), (ok_ans, msg_ans), (ok_exp, msg_exp)):
+    health = {}                                   # one check per distinct model
+    for l in agent_llms.values():
+        if l.model not in health:
+            health[l.model] = (l.health(), l)
+    # load each model once per session so the first question does not pay 5-10 s of model loading. In a
+    # background thread: loading blocks for seconds per model (longer when models evict each other from memory),
+    # and a blocking load left the page blank on every sidebar toggle.
+    warmed = st.session_state.setdefault("warmed_models", set())
+    for name, ((ok, _), l) in health.items():
+        if ok and name not in warmed:
+            warmed.add(name)
+            threading.Thread(target=l.warm, daemon=True, name=f"warm-{name}").start()
+    st.markdown(chip("Database" if ok_db else "Database offline", "ok" if ok_db else "err"), unsafe_allow_html=True)
+    st.markdown('<div class="side-label">Models per agent</div>', unsafe_allow_html=True)
+    rows = []
+    for key in agent_llms:
+        name, source = in_use[key]
+        (ok, _), _ = health[name]
+        rows.append(f'<div class="model-row"><div class="model-name">{esc(AGENTS[key][0])} · {esc(name)}'
+                    f'{"" if ok else " ⚠️"}</div><div class="model-meta">{esc(source)}</div></div>')
+    st.markdown("".join(rows), unsafe_allow_html=True)
+    for ok, msg in [(ok_db, msg_db)] + [h for h, _ in health.values()]:
         if not ok:
             st.markdown(f'<p class="side-note">{esc(msg)}</p>', unsafe_allow_html=True)
 
@@ -417,7 +431,9 @@ def render_step(s: Step) -> None:
         if s.reasoning:
             st.markdown(f'<div class="reasoning"><b>Model reasoning</b>{esc(s.reasoning)}</div>',
                         unsafe_allow_html=True)
-        scalars = {k: v for k, v in s.details.items() if k != "error" and is_scalar(v)}
+        calls = s.details.get("llm_calls") or []
+        hidden = {"error", "llm_calls"} | ({"thinking"} if calls else set())    # the calls show the thinking
+        scalars = {k: v for k, v in s.details.items() if k not in hidden and is_scalar(v)}
         if scalars:
             items = "".join(f'<span class="kv"><i>{esc(label_of(k))}</i><b>{esc(v)}</b></span>'
                             for k, v in scalars.items())
@@ -425,8 +441,41 @@ def render_step(s: Step) -> None:
         for k, v in s.details.items():
             if k == "error":
                 st.error(v)
-            elif k not in scalars:
+            elif k not in scalars and k not in hidden:
                 render_value(k, v)
+        for i, call in enumerate(calls, 1):
+            render_llm_call(call, i if len(calls) > 1 else 0, s.reasoning)
+
+
+def render_llm_call(call: dict, n: int, reasoning: str | None) -> None:
+    """One model call of a step: which agent and model, its reasoning, and exactly what was sent and returned."""
+    head = (chip(f"{call.get('agent', 'Model')} agent", "brand") + chip(call.get("model", "?"), "ok")
+            + chip(f"thinking {call.get('thinking', 'off')}", dot=False)
+            + (chip(call["model_source"], dot=False) if call.get("model_source") else "")
+            + (chip(f"{call['knowledge_passages']} knowledge passages", dot=False)
+               if call.get("knowledge_passages") else ""))
+    st.markdown(f'<span class="field-label">Model call{f" {n}" if n else ""}</span>'
+                f'<div class="kv-row">{head}</div>', unsafe_allow_html=True)
+    if call.get("error"):
+        st.error(f"Request failed: {call['error']}")
+    with st.expander("Model's reasoning"):
+        if call.get("thinking_text"):
+            st.code(call["thinking_text"], language="text", wrap_lines=True)
+        else:
+            st.caption("This model does not stream separate reasoning (only thinking models such as qwen3 or "
+                       "deepseek-r1 do). Its own short explanation, when it gives one, is the \"Model reasoning\" "
+                       "box above; the full reply is below.")
+            if reasoning:
+                st.markdown(esc(reasoning))
+    with st.expander(f"Request sent to {call.get('model', 'the model')}"):
+        st.markdown('<span class="field-label">System prompt (instructions, plus any knowledge passages)</span>',
+                    unsafe_allow_html=True)
+        st.code(call.get("system", ""), language="text", wrap_lines=True)
+        st.markdown('<span class="field-label">User message (the data and question for this step)</span>',
+                    unsafe_allow_html=True)
+        st.code(call.get("user", ""), language="text", wrap_lines=True)
+    with st.expander("Raw reply from the model"):
+        st.code(call.get("response") or "(no reply)", language="json", wrap_lines=True)
 
 
 # Categorical palette (fixed order, validated for colour-blind safety); a single series uses slot 1.
@@ -644,7 +693,8 @@ def render_result(r: AgentResult) -> None:
 
 # -------------------------------------------------------------------- main
 status_chips = (chip("MySQL" if ok_db else "MySQL offline", "ok" if ok_db else "err")
-                + chip("Ollama" if ok_llm else "Ollama offline", "ok" if ok_llm else "err")
+                + chip("Ollama" if all(ok for (ok, _), _ in health.values()) else "Ollama: model missing",
+                       "ok" if all(ok for (ok, _), _ in health.values()) else "err")
                 + chip(f"{len(names)} models", dot=False))
 st.markdown(
     f'<div class="app-head"><div><h1 class="app-title">Local Data Agent</h1>'
@@ -684,6 +734,9 @@ if question:
             def live(s: Step) -> None:
                 l = s.details.get("llm")      # Ollama token stats, when the step called a model
                 tok = f"{l['prompt_tokens']}→{l['gen_tokens']} tok · {l['tok_per_s']} tok/s" if l else ""
+                calls = s.details.get("llm_calls") or []
+                if calls:
+                    tok = f"{calls[-1].get('agent', '')} · {calls[-1].get('model', '')}" + (f" · {tok}" if tok else "")
                 status.markdown(f'<div class="step-head"><span class="step-num {TONE.get(s.status, "")}">'
                                 f'{s.index}</span><span class="step-title">{esc(s.name)}</span>'
                                 f'<span class="step-time">{s.duration_ms:.0f} ms</span>'

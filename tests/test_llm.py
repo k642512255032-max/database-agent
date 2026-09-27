@@ -88,3 +88,28 @@ def test_request_failure_is_llm_error(monkeypatch):
     monkeypatch.setattr(requests, "post", boom)
     with pytest.raises(LLMError, match="Ollama request failed"):
         OllamaLLM("qwen3:8b").chat("s", "u")
+
+
+def test_step_records_each_model_call_with_request_reply_and_thinking(post):
+    trace = Trace("q")
+    with trace.step("x", "why"):
+        OllamaLLM("qwen3:8b").chat_json("You are the router.", "Question: pay gap?", {"type": "object"})
+    call = trace.steps[0].details["llm_calls"][0]
+    assert call["model"] == "qwen3:8b" and call["thinking"] == "on"
+    assert call["system"] == "You are the router." and call["user"] == "Question: pay gap?"
+    assert call["response"] == '{"answer": "42"}' and call["thinking_text"] == "Let me reason..."
+    assert "You are the router." in trace.as_text()           # the downloaded trace keeps the full request
+    OllamaLLM("qwen3:8b").chat_json("outside", "any step", {"type": "object"})
+    assert len(trace.steps[0].details["llm_calls"]) == 1     # calls outside a step are not attached
+
+
+def test_failed_call_still_shows_what_was_sent(monkeypatch):
+    def boom(url, json=None, timeout=None):
+        raise requests.ConnectionError("refused")
+    monkeypatch.setattr(requests, "post", boom)
+    trace = Trace("q")
+    with pytest.raises(LLMError):
+        with trace.step("x", "why"):
+            OllamaLLM("qwen2.5:7b").chat("sys", "user")
+    call = trace.steps[0].details["llm_calls"][0]
+    assert call["user"] == "user" and "refused" in call["error"] and call["response"] == ""

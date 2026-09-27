@@ -7,9 +7,11 @@ import json, os, re, subprocess, sys, time, urllib.request
 
 APP = "/content/database-agent"
 LOG = "/tmp/agent-logs"
-# Models: override with env vars, e.g.  SQL_MODEL=qwen2.5-coder:7b THINK_MODEL=qwen3:8b  (stronger pair, 10 GB)
-SQL_MODEL = os.environ.get("SQL_MODEL", "qwen2.5-coder:3b")
-THINK_MODEL = os.environ.get("THINK_MODEL", "qwen3:4b")
+# Models: override with env vars. Default: two 7B models that stay loaded on a T4 together; the answer model is a
+# plain instruct model because a thinking model (e.g. THINK_MODEL=qwen3:4b) reasons at length before every answer.
+SQL_MODEL = os.environ.get("SQL_MODEL", "qwen2.5-coder:7b")
+THINK_MODEL = os.environ.get("THINK_MODEL", "qwen2.5:7b-instruct")
+BRANCH = os.environ.get("BRANCH", "main")                 # git branch of the app to run
 EXPERT_ON = os.environ.get("EXPERT", "0") not in ("0", "false", "no", "")   # EXPERT=1 to start with the Expert AI on
 ROOT_PW, RO_USER, RO_PW = "rootpw", "agent_ro", "agent_ro_pw"
 os.makedirs(LOG, exist_ok=True)
@@ -56,7 +58,7 @@ ok(f"GPU {gpu}") if gpu else bad("no GPU - Runtime > Change runtime type > T4 GP
 step("Code")
 if not os.path.isdir(APP):
     sh(f"git clone -q https://github.com/k642512255032-max/database-agent.git {APP}", check=True)
-sh(f"cd {APP} && git pull -q")
+sh(f"cd {APP} && git fetch -q origin {BRANCH} && git checkout -q -B {BRANCH} FETCH_HEAD", check=True)
 ok(f"{APP} @ {sh(f'cd {APP} && git log --oneline -1')}")
 
 # ------------------------------------------------------------------ 2. MySQL + employees

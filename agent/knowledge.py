@@ -35,7 +35,8 @@ AGENTS: dict[str, tuple[str, str, str]] = {
     "understanding": ("Understanding", "Request standardiser: rewrites each message into one explicit question.",
                       "Glossaries, abbreviations, business terms, how users phrase questions, examples of "
                       "questions and what they really mean."),
-    "router": ("Router", "Decides whether a request is a plain data query, statistics or machine learning.",
+    "router": ("Router", "Decides whether a request is a plain data query, statistics or machine learning, "
+                          "and picks the statistical test.",
                "Which kinds of questions need a statistical test or a model, and which are plain look-ups."),
     "sql": ("SQL writer", "Code agent: writes and repairs the SQL query.",
             "Data dictionary, table and column meanings, join rules, business definitions (e.g. 'current "
@@ -358,11 +359,28 @@ class KnowledgeLLM:
             used += len(p.text)
         return system + KNOWLEDGE_HEADER + "\n".join(body)
 
+    def _call(self, method: str, system: str, user: str, schema: Optional[dict]) -> Any:
+        target = self._target()
+        try:
+            return getattr(target, method)(self._augment(system, user), user, schema)
+        finally:     # label the recorded call (agent.trace) with the agent and where its model came from
+            call = getattr(target, "last_request", None)
+            if isinstance(call, dict) and call:
+                call.update(agent=AGENTS[self.agent][0], model_source=("Agent settings override"
+                            if self.kb.model_for(self.agent) else "chat sidebar / .env"),
+                            knowledge_passages=len(self.last_knowledge))
+
     def chat_json(self, system: str, user: str, schema: dict) -> dict:
-        return self._target().chat_json(self._augment(system, user), user, schema)
+        return self._call("chat_json", system, user, schema)
 
     def chat(self, system: str, user: str, schema: Optional[dict] = None) -> str:
-        return self._target().chat(self._augment(system, user), user, schema)
+        return self._call("chat", system, user, schema)
+
+    def health(self) -> tuple[bool, str]:             # checks the model the calls really go to
+        return self._target().health()
+
+    def warm(self) -> tuple[bool, str]:
+        return self._target().warm()
 
     def light(self) -> "KnowledgeLLM":
         if not hasattr(self.inner, "light"):
