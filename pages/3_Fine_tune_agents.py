@@ -11,6 +11,7 @@ import html
 import pandas as pd
 import streamlit as st
 
+from agent.agent_catalog import default_model
 from agent.config import settings
 from agent.knowledge import AGENTS, UPLOAD_TYPES, KnowledgeBase
 from agent.llm import OllamaLLM
@@ -176,7 +177,7 @@ with st.container(border=True):
         if status["dataset"] < 200:
             st.caption(f"{status['dataset']} examples is a small dataset; a few hundred give a steadier result. "
                        "Hand-written .jsonl examples are worth more than generated ones.")
-    base = (settings.answer_model or settings.model) if agent in ("answer", "memory", "expert") else settings.model
+    base = default_model(agent)
     st.markdown("**b.** On the Colab host (T4 GPU), upload the dataset and run:")
     st.code(f"!python deploy/colab/finetune_agent.py --data {agent}_train.jsonl --base {base} --name {agent}-ft",
             language="bash")

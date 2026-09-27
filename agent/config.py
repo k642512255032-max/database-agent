@@ -122,5 +122,9 @@ class Settings:
     knowledge_min_score: float = float(os.getenv("KNOWLEDGE_MIN_SCORE", "0.35"))  # keep passages scoring >= this share of the best
     knowledge_query_chars: int = int(os.getenv("KNOWLEDGE_QUERY_CHARS", "3000"))  # tail of the prompt used as the search query
 
+    # --- Agent settings (pages/4_Agent_settings.py, agent/prompt_store.py) ---
+    # prompt overrides saved from the page; outside knowledge/<agent>/ so "Reset agent" does not wipe them
+    prompts_file: Path = Path(os.getenv("AGENT_PROMPTS_FILE", str(ROOT / "knowledge" / "prompts.json")))
+
 
 settings = Settings()

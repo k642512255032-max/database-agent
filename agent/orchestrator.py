@@ -40,6 +40,7 @@ from .db import Database, UnsafeSQLError
 from .expert_agent import DataPlan, ExpertAgent
 from .knowledge import KnowledgeBase, KnowledgeLLM
 from .llm import OllamaLLM
+from .prompt_store import prompt
 from .request_agent import RequestStandardizer, StandardRequest, previous_turn_text
 from .trace import Step, Trace
 
@@ -124,10 +125,27 @@ class DataAgent:
         self.knowledge = knowledge or KnowledgeBase()
         self._router_llm = KnowledgeLLM(self.llm, self.knowledge, "router")
         self._sql_llm = KnowledgeLLM(self.llm, self.knowledge, "sql")
+        self.wrap_agents()
+
+    def wrap_agents(self) -> None:
+        """Give each sub-agent its knowledge / model override (Fine-tune agents and Agent settings pages).
+        Call again after replacing an agent or its llm, as the chat page's sidebar does on every rerun."""
         for owner, key in ((self.standardizer, "understanding"), (self.context_builder, "memory"),
                            (self.expert_agent, "expert"), (self.answer_agent, "answer")):
             if not isinstance(owner.llm, KnowledgeLLM):
                 owner.llm = KnowledgeLLM(owner.llm, self.knowledge, key)
+
+    def agent_llms(self) -> dict[str, Any]:
+        """Agent key (agent.knowledge.AGENTS) -> the LLM its calls go through, as wired right now."""
+        return {"understanding": self.standardizer.llm, "router": self._router_llm, "sql": self._sql_llm,
+                "expert": self.expert_agent.llm, "answer": self.answer_agent.llm, "memory": self.context_builder.llm}
+
+    def models_in_use(self) -> dict[str, tuple[str, str]]:
+        """Agent key -> (model its calls go to, where that choice comes from). Same resolution as the calls
+        themselves: an Agent settings override wins over the chat sidebar / .env model."""
+        return {key: (getattr(llm, "model", "?"),
+                      "Agent settings" if self.knowledge.model_for(key) else "chat sidebar / .env")
+                for key, llm in self.agent_llms().items()}
 
     # ================================================================ public
     def ask(self, question: str, on_step: Callable[[Step], None] | None = None,
@@ -243,7 +261,7 @@ class DataAgent:
                 s.add(router="skipped")
             else:
                 try:
-                    out = self._router_llm.chat_json(prompts.ROUTER_SYSTEM,
+                    out = self._router_llm.chat_json(prompt("router.system", prompts.ROUTER_SYSTEM),
                                              prompts.router_user(res.standalone_question, self.registry.manifest_text()),
                                              prompts.ROUTER_SCHEMA)
                     s.add_thinking(self._router_llm)
@@ -353,7 +371,7 @@ class DataAgent:
             extra = self._conversation + "\n" + extra
 
         with res.trace.step("Generate SQL", "Translate the English request into a SQL query using the schema.") as s:
-            out = self._sql_llm.chat_json(prompts.SQL_SYSTEM.format(dialect=dialect),
+            out = self._sql_llm.chat_json(prompt("sql.system", prompts.SQL_SYSTEM, dialect=dialect),
                                      prompts.sql_user(res.standalone_question, schema_text, extra), prompts.SQL_SCHEMA)
             s.add_thinking(self._sql_llm)
             sql = _clean_sql(out.get("sql", ""))
@@ -365,7 +383,7 @@ class DataAgent:
             if last_error is not None:
                 with res.trace.step(f"Repair SQL (attempt {attempt - 1})",
                                     "The previous query failed; the error message is sent back to the model to fix it.") as s:
-                    out = self._sql_llm.chat_json(prompts.FIX_SYSTEM.format(dialect=dialect),
+                    out = self._sql_llm.chat_json(prompt("sql.fix", prompts.FIX_SYSTEM, dialect=dialect),
                                              prompts.fix_user(res.standalone_question, schema_text, sql, last_error, extra),
                                              prompts.SQL_SCHEMA)
                     s.add_thinking(self._sql_llm)
@@ -411,9 +429,10 @@ class DataAgent:
                             "Pick the test that matches the question and the column types in the result.") as s:
             profile = "\n".join(f"- {c}: {df[c].dtype}, {df[c].nunique()} distinct" for c in df.columns)
             try:
-                out = self.llm.chat_json(prompts.STATS_SYSTEM, prompts.stats_user(res.standalone_question, profile),
-                                         prompts.STATS_SCHEMA)
-                s.add_thinking(self.llm)
+                # part of the Router agent: its knowledge and model override apply (Agent settings page)
+                out = self._router_llm.chat_json(prompt("router.stats", prompts.STATS_SYSTEM),
+                                                 prompts.stats_user(res.standalone_question, profile), prompts.STATS_SCHEMA)
+                s.add_thinking(self._router_llm)
             except Exception as exc:
                 out = {"method": "describe", "target": "", "group": "", "columns": [],
                        "reasoning": f"LLM failed ({exc}); defaulting to descriptive statistics."}

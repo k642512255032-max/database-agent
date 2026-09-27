@@ -8,6 +8,7 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -45,6 +46,21 @@ class Step:
                                    "tok_per_s": round((stats.get("eval_count") or 0) / gen_s, 1) if gen_s else 0.0}
         return self
 
+# the step that is running in this thread: model calls made inside it are recorded on it (see record_llm_call)
+_CURRENT_STEP: ContextVar[Optional[Step]] = ContextVar("current_step", default=None)
+
+
+def record_llm_call(call: dict[str, Any]) -> None:
+    """Attach a model call (model, prompts sent, reply, thinking) to the running step, if any.
+
+    Called by the LLM client before the request goes out; the client fills in the reply afterwards on the same
+    dict, so a call that fails still shows what was sent.
+    """
+    step = _CURRENT_STEP.get()
+    if step is not None:
+        step.details.setdefault("llm_calls", []).append(call)
+
+
 @dataclass
 class Trace:
     question: str
@@ -58,6 +74,7 @@ class Trace:
     def step(self, name: str, why: str):
         s = Step(index=len(self.steps) + 1, name=name, why=why)
         self.steps.append(s)
+        token = _CURRENT_STEP.set(s)
         t0 = time.perf_counter()
         try:
             yield s
@@ -68,6 +85,7 @@ class Trace:
             s.details["error"] = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            _CURRENT_STEP.reset(token)
             s.duration_ms = round((time.perf_counter() - t0) * 1000, 1)
             if self.on_step and threading.get_ident() == self._owner:
                 self.on_step(s)
@@ -89,8 +107,16 @@ class Trace:
             if s.reasoning:
                 lines.append(f"    model reasoning: {s.reasoning}")
             for k, v in s.details.items():
+                if k == "llm_calls":
+                    continue
                 text = str(v)
                 if len(text) > 400:
                     text = text[:400] + " ..."
                 lines.append(f"    {k}: {text}")
+            for i, call in enumerate(s.details.get("llm_calls", []), 1):   # in full: this is the audit trail
+                lines.append(f"    --- model call {i}: {call.get('agent', '?')} agent on {call.get('model')} "
+                             f"(thinking {call.get('thinking')})")
+                for part in ("system", "user", "thinking_text", "response", "error"):
+                    if call.get(part):
+                        lines.append(f"    [{part}]\n{call[part]}")
         return "\n".join(lines)

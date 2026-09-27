@@ -17,6 +17,7 @@ import pandas as pd
 from . import prompts
 from .context import ConversationContext, _clean_list, _clip
 from .llm import OllamaLLM
+from .prompt_store import prompt
 from .trace import Trace
 
 TASKS = ("lookup", "list", "count", "aggregate", "rank", "compare", "trend", "analysis", "prediction", "other")
@@ -76,7 +77,7 @@ class RequestStandardizer:
                         "turns, fix wording, and pull out filters, measures, grouping, sort and limit.") as s:
             s.add(context_given_to_model=memory or "(empty - first question of the conversation)")
             try:
-                out = self.llm.chat_json(prompts.REQUEST_SYSTEM, prompts.request_user(memory, previous, q),
+                out = self.llm.chat_json(prompt("understanding.system", prompts.REQUEST_SYSTEM), prompts.request_user(memory, previous, q),
                                          prompts.REQUEST_SCHEMA)
                 s.add_thinking(self.llm)
             except Exception as exc:

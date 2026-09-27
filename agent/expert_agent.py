@@ -25,6 +25,7 @@ from agent import data_quality as dq
 from agent.answer_agent import _table_text
 from agent.config import settings
 from agent.llm import OllamaLLM
+from agent.prompt_store import prompt
 from agent.trace import Step, Trace
 
 if TYPE_CHECKING:
@@ -321,8 +322,9 @@ class ExpertAgent:
         return system + ("\n\nYou are briefed on the database:\n" + self.briefing if self.briefing else "")
 
     def system_prompt(self, task: str) -> str:
-        focus = TASK_FOCUS.get(task, TASK_FOCUS["data_query"])
-        return self._briefed(_COMMON.format(persona=self.persona)) + "\n\n" + focus + "\n\n" + REVIEW_FORMAT
+        t = task if task in TASK_FOCUS else "data_query"
+        return (self._briefed(prompt("expert.review", _COMMON, persona=self.persona)) + "\n\n"
+                + prompt(f"expert.focus.{t}", TASK_FOCUS[t]) + "\n\n" + prompt("expert.review_format", REVIEW_FORMAT))
 
     # ------------------------------------------------------------ plan (before SQL)
     def plan(self, res: "AgentResult", trace: Trace, schema_text: str, schema: dict, ml_note: str = "") -> DataPlan | None:
@@ -338,7 +340,7 @@ class ExpertAgent:
             s.add(model=getattr(self.llm, "model", "?"), persona=self.persona,
                   briefing_given_to_model=self.briefing or "(none)", schema_given_to_model=schema_text)
             try:
-                out = self.llm.chat_json(PLAN_SYSTEM.format(persona=self.persona), material, PLAN_SCHEMA)
+                out = self.llm.chat_json(prompt("expert.plan", PLAN_SYSTEM, persona=self.persona), material, PLAN_SCHEMA)
                 s.add_thinking(self.llm)
                 s.reasoning = out.get("reasoning")
                 plan, notes = validate_plan(out, schema)
@@ -384,7 +386,7 @@ class ExpertAgent:
                         "and fix, insights, recommendations, questions for the data owner.") as s:
             s.add(model=getattr(self.llm, "model", "?"), persona=self.persona, quality_report_given_to_model=sheet)
             try:
-                out = _clean_audit(self.llm.chat_json(self._briefed(AUDIT_SYSTEM.format(persona=self.persona)),
+                out = _clean_audit(self.llm.chat_json(self._briefed(prompt("expert.audit", AUDIT_SYSTEM, persona=self.persona)),
                                                       f"AUDIT SHEET for table {table}:\n{sheet}", AUDIT_SCHEMA))
                 s.add_thinking(self.llm)
                 s.add(quality_score=out["quality_score"], issues=len(out["issues"]))

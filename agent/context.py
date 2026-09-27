@@ -22,6 +22,7 @@ import pandas as pd
 from . import prompts
 from .config import settings
 from .llm import OllamaLLM, light_llm
+from .prompt_store import prompt
 from .trace import Trace
 
 if TYPE_CHECKING:  # avoid a circular import at runtime
@@ -106,7 +107,7 @@ class ContextBuilder:
             llm = light_llm(self.llm)      # folding a turn into the memory is form-filling, not reasoning
             s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not self.llm else "on")
             try:
-                out = llm.chat_json(prompts.CONTEXT_SYSTEM,
+                out = llm.chat_json(prompt("memory.system", prompts.CONTEXT_SYSTEM),
                                     prompts.context_user(json.dumps(ctx.to_dict(), ensure_ascii=False), turn),
                                     prompts.CONTEXT_SCHEMA)
                 new = ConversationContext.from_dict(out)
