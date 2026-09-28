@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -39,6 +40,12 @@ def _on(name: str, default: str = "1") -> bool:
     return os.getenv(name, default) not in ("0", "false", "no", "")
 
 
+def _keep_alive(value: str) -> str | int:
+    """Ollama reads a JSON number as seconds but rejects a string without a unit ("-1" -> HTTP 400)."""
+    value = value.strip()
+    return int(value) if re.fullmatch(r"-?\d+", value) else value
+
+
 @dataclass
 class Settings:
     # --- Database -----------------------------------------------------------
@@ -62,8 +69,9 @@ class Settings:
     # Model names matching this regex get thinking switched on and the longer timeout.
     thinking_models: str = os.getenv("OLLAMA_THINKING_MODELS", r"qwen3|deepseek-r1|gpt-oss|magistral|phi4-reasoning")
     llm_think_timeout_s: int = int(os.getenv("LLM_THINK_TIMEOUT_S", "900"))
-    # How long Ollama keeps a model (and its prompt cache) loaded after a call; "-1" = forever. Sent with every request.
-    llm_keep_alive: str = os.getenv("LLM_KEEP_ALIVE", "30m")
+    # How long Ollama keeps a model (and its prompt cache) loaded after a call: a duration ("30m", "2h") or seconds
+    # (-1 = forever). Sent with every request.
+    llm_keep_alive: str | int = field(default_factory=lambda: _keep_alive(os.getenv("LLM_KEEP_ALIVE", "30m")))
     # Separate model for the answer agent (explanations + chart planning). Empty = same as OLLAMA_MODEL.
     # A general instruct model (e.g. qwen2.5:7b-instruct) writes far better prose than a coder model.
     answer_model: str = os.getenv("OLLAMA_ANSWER_MODEL", "")
