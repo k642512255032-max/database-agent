@@ -20,6 +20,7 @@ All models run on your machine through **Ollama** (default `qwen2.5-coder:3b` + 
 | **Expert AI** | A specialist briefed on your database plans the data before the SQL and reviews the result after it: quality score, its own answer, insights and business advice; plus a whole-table **Expert audit** page |
 | **Fine-tune agents** | Upload documents per agent (PDF, Word, Markdown, SQL, CSV); each agent retrieves its own knowledge (BM25), or trains a LoRA model on Colab and plugs it in |
 | **Agent settings** | One tab to see and edit every agent's system prompts, model and knowledge; changes are saved and apply from the next question, with one-click reset to the default |
+| **Custom flows and agents** | Build your own flows: add, remove and drag steps into a new order, pick which agent runs each step, and create your own agents (instructions, model, documents) that add notes, rewrite the question or add a section to the answer |
 | **Per-agent switches** | Turn each agent on or off from the sidebar; speed settings (thinking off for light steps, router shortcut, background memory, keep-alive) for CPU-only laptops |
 | **Free hosting for demos** | One Colab notebook runs MySQL, Ollama, the models and the app on a free T4 GPU and prints a public link |
 
@@ -260,6 +261,42 @@ Pick an agent to see, in one place, everything that shapes it, and change any of
   The JSON output schema of each step is not editable, so an edit cannot change the fields an agent returns.
 * **Knowledge**: the agent's documents, with upload and re-index; probing and LoRA training stay on the Fine-tune page.
 
+### Custom flows and agents (`pages/5_Flows.py`, `agent/flows.py`, `agent/custom_agents.py`)
+A **flow** is the list of steps a question goes through. The built-in **Standard** flow is the pipeline above and
+cannot be changed; **New copy** makes an editable flow. On the Flows page you can drag steps into a new order, add
+and remove steps, and choose the agent that runs each step. Pick the active flow in the chat sidebar (per browser
+session; **Make default** sets the one new sessions start with). The sidebar's on/off switches still apply inside any
+flow. Answers from a non-standard flow show a `Flow · <name>` chip.
+
+| Step | Needs | Produces | Default agent |
+|---|---|---|---|
+| Standardise the request | – | the standardised request | Understanding |
+| Understand the request | – | the intent | Router |
+| Expert data plan | – | the expert plan | Expert AI |
+| Select relevant tables | – | the selected tables | (no model) |
+| Write & run SQL | the selected tables | the SQL and the result table | SQL writer |
+| Statistics / ML analysis | the result table | the analysis | Router |
+| Expert assessment | the result table | the expert assessment | Expert AI |
+| Write the answer | the result table | the answer | Answer & charts |
+| Plan charts | the result table | the charts | Answer & charts |
+| Update conversation memory | – | – (always runs after the answer is shown) | Memory |
+
+The editor **warns** about orders that cannot work (e.g. *Write the answer* above *Write & run SQL*) but never
+blocks saving; running such a flow stops with an explanation naming the step to move or add.
+
+A **custom agent** (Custom agents tab) is a name, instructions, a model and optional documents (retrieved like a
+built-in agent's). It can:
+* **run its own step**: it reads one part of the turn (the question, the standardised request, the SQL, the result
+  table, the expert assessment or the answer) and writes **a note for later steps** (added to the SQL writer's and the
+  answer's prompts), **a rewritten question**, or **a section added to the answer**. A failing custom step is a
+  warning; it never stops the turn;
+* **run a built-in step** instead of its default agent: the step keeps its own prompt and output format, and the
+  agent's instructions are added at the end; the agent's model and documents are used.
+
+Flows are saved to `knowledge/flows.json` (`AGENT_FLOWS_FILE`), custom agents to `knowledge/custom_agents.json`
+(`CUSTOM_AGENTS_FILE`) and their documents to `knowledge/<agent id>/`: per machine, like the prompt overrides.
+Every step of every flow shows in the Step-by-step tab with its model, prompts and reply.
+
 ### Statistical models (`agent/stats_tools.py`)
 `describe`, `correlation` (Pearson and Spearman with p-values), `group_summary`, `ttest` (Welch + Cohen's d),
 `anova`, `chi_square` (+ Cramér's V), `normality` (Shapiro-Wilk), `linear_regression` (OLS),
@@ -390,6 +427,7 @@ host of section 4b, which starts Ollama with the same settings.
 app.py                  Streamlit UI (chat)     ui_shared.py  cached agent shared by the pages
 pages/1_Dashboards.py   Dashboards page: describe -> build -> preview -> publish
 pages/2_Expert_audit.py Expert audit page: profile a table -> findings -> expert report
+pages/5_Flows.py        Flows page: build flows (drag to reorder, assign agents) and custom agents
 briefings/              database briefings for the expert (employees.md, shop.md; add <database>.md for yours)
 deploy/colab/           free temporary hosting: bootstrap.sh + serve.sh + Host_on_Colab.ipynb
 deploy/windows/         ollama_env.ps1: Ollama server tuning on Windows (cache slots, keep-alive, optional iGPU)
@@ -399,7 +437,8 @@ dashboard/  spec.py  prompts.py  builder.py (design + fetch + render)  render.py
 train_models.py         one-off training → models/*.joblib + manifest.json
 training_config.yaml    which models to train, on which SQL
 agent/  config.py  db.py (schema, linking, SQL guard)  llm.py (Ollama JSON-schema output)
-        prompts.py  orchestrator.py (the pipeline)  answer_agent.py (explanations + chart plans)
+        prompts.py  orchestrator.py (the flow engine)  answer_agent.py (explanations + chart plans)
+        flows.py (steps, Standard flow, checks, saved flows)  custom_agents.py (user-made agents)
         request_agent.py (request standardiser)  context.py (conversation memory + context builder)
         stats_tools.py  trace.py (explainability)
         export.py (CSV/Excel/PNG)  powerbi.py (.pbip project)

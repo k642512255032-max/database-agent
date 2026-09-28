@@ -17,3 +17,4 @@ openpyxl>=3.1           # Excel export
 vl-convert-python>=1.6  # offline PNG rendering of Altair charts (no browser, nothing leaves the machine)
 pypdf>=4.0             # PDF documents uploaded on the Fine-tune agents / Agent settings pages
 python-docx>=1.1       # Word (.docx) documents, same pages
+streamlit-sortables>=0.3.1  # drag-and-drop step order on the Flows page

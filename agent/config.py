@@ -134,5 +134,10 @@ class Settings:
     # prompt overrides saved from the page; outside knowledge/<agent>/ so "Reset agent" does not wipe them
     prompts_file: Path = Path(os.getenv("AGENT_PROMPTS_FILE", str(ROOT / "knowledge" / "prompts.json")))
 
+    # --- Flows (pages/5_Flows.py, agent/flows.py, agent/custom_agents.py) ---
+    # saved flows and user-made agents; per machine like the prompt overrides (knowledge/ is git-ignored)
+    flows_file: Path = Path(os.getenv("AGENT_FLOWS_FILE", str(ROOT / "knowledge" / "flows.json")))
+    custom_agents_file: Path = Path(os.getenv("CUSTOM_AGENTS_FILE", str(ROOT / "knowledge" / "custom_agents.json")))
+
 
 settings = Settings()

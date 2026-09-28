@@ -8,10 +8,12 @@ import threading
 import altair as alt
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 from agent.answer_agent import AnswerAgent
 from agent.config import settings
 from agent.expert_agent import ExpertAgent, review_markdown
+from agent.flows import flow_store
 from agent.export import EXCEL_MAX_ROWS, chart_to_png, export_filenames, to_csv_bytes, to_xlsx_bytes
 from agent.powerbi import to_pbip_bytes
 from agent.knowledge import AGENTS
@@ -32,7 +34,7 @@ MODE_INTENT = {"Data query": "data_query", "Statistics": "statistics", "Machine 
 CODE_KEYS = {"sql", "validated_sql", "schema_given_to_model", "facts_given_to_model",
              "context_given_to_model", "facts", "previous_error", "original_question",
              "standalone_question", "turn_given_to_model", "updated_context", "quality_report_given_to_model",
-             "briefing_given_to_model", "thinking"}
+             "briefing_given_to_model", "thinking", "material_given_to_model"}
 TAG_KEYS = {"selected_tables", "columns", "available_models", "explanations",
             "feature_names", "required_columns", "top_features",
             "entities", "filters", "metrics", "grouping", "ambiguities"}
@@ -49,7 +51,8 @@ LABELS = {"sql": "Generated SQL", "validated_sql": "Validated SQL (what actually
           "dropped": "Dropped by validation", "source": "Source", "thinking": "Model's thinking (reasoning model)",
           "previous_error": "Error returned by the database", "plan": "Feature-engineering plan",
           "rows": "Rows", "rows_scored": "Rows scored", "raw_columns": "Raw columns",
-          "model_features": "Model features"}
+          "model_features": "Model features", "material_given_to_model": "Material sent to the custom agent",
+          "result": "What the agent wrote", "reads": "Reads", "writes": "Writes"}
 
 EXAMPLES = {
 }
@@ -200,6 +203,19 @@ with st.sidebar:
                                  help="A stronger instruct model, e.g. qwen2.5:14b-instruct, gives better judgement.")
 
     # ---- one switch per agent (each is a model call per question; the router and the SQL writer always run)
+    # ---- flow: which steps run, in which order, by which agent (pages/5_Flows.py); per session
+    st.markdown('<div class="side-label">Flow</div>', unsafe_allow_html=True)
+    flow_names = flow_store.names()
+    if st.session_state.get("flow_name") not in flow_names:        # first run, or the flow was deleted
+        st.session_state["flow_name"] = flow_store.default_name()
+    flow_name = st.selectbox("Flow", flow_names, key="flow_name", label_visibility="collapsed",
+                             help="Which steps run, in which order, and which agent runs each. Edit flows on the "
+                                  "Flows page. The switches below still apply inside any flow.")
+    active_flow = flow_store.get(flow_name)
+    try:
+        st.page_link("pages/5_Flows.py", label="Edit flows", icon="🧭")
+    except StreamlitAPIException:        # app opened without its pages (e.g. a bare test run)
+        pass
     st.markdown('<div class="side-label">Agents</div>', unsafe_allow_html=True)
     standardise_on = st.toggle("Request standardiser", value=settings.standardise_requests,
                                help="Step 0 (SQL model): rewrites the message into one explicit request and resolves "
@@ -259,9 +275,10 @@ with st.sidebar:
               "expert": expert_on, "memory": remember}
     agent_llms = {k: l for k, l in agent.agent_llms().items() if active[k]}
     in_use = agent.models_in_use()
+    custom_llms = agent.custom_llms(active_flow)   # custom agents used by the active flow
     ok_db, msg_db = agent.db.ping()
     health = {}                                   # one check per distinct model
-    for l in agent_llms.values():
+    for l in list(agent_llms.values()) + list(custom_llms.values()):
         if l.model not in health:
             health[l.model] = (l.health(), l)
     # load each model once per session so the first question does not pay 5-10 s of model loading. In a
@@ -280,6 +297,10 @@ with st.sidebar:
         (ok, _), _ = health[name]
         rows.append(f'<div class="model-row"><div class="model-name">{esc(AGENTS[key][0])} · {esc(name)}'
                     f'{"" if ok else " ⚠️"}</div><div class="model-meta">{esc(source)}</div></div>')
+    for name, l in custom_llms.items():
+        (ok, _), _ = health[l.model]
+        rows.append(f'<div class="model-row"><div class="model-name">{esc(name)} · {esc(l.model)}'
+                    f'{"" if ok else " ⚠️"}</div><div class="model-meta">custom agent</div></div>')
     st.markdown("".join(rows), unsafe_allow_html=True)
     for ok, msg in [(ok_db, msg_db)] + [h for h, _ in health.values()]:
         if not ok:
@@ -615,6 +636,8 @@ def render_result(r: AgentResult) -> None:
     meta = chip(INTENT_LABEL.get(r.intent, r.intent), "err" if r.error else "brand")
     if r.model_name:
         meta += chip(r.model_name, dot=False)
+    if r.flow != "Standard":
+        meta += chip(f"Flow · {r.flow}", dot=False)
     if r.data is not None:
         meta += chip(f"{len(r.data):,} rows", dot=False)
     with st.container(border=True):
@@ -745,7 +768,7 @@ if question:
 
             history = [r for _, r in st.session_state.history] if remember else []
             result = agent.ask(question, on_step=live, force_intent=intent, force_model=force_model,
-                               history=history, build_context=remember)
+                               history=history, build_context=remember, flow=active_flow)
             t = result.trace.timing()
             status.update(label=(f"Done in {t['total_ms'] / 1000:.0f} s (LLM {t['llm_ms'] / 1000:.0f} s, "
                                  f"{t['llm_calls']} calls)") if not result.error else "Finished with errors",

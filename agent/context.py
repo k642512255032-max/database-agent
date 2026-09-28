@@ -98,14 +98,16 @@ class ContextBuilder:
         # defaults to the answer model: summarising is prose work, not SQL work
         self.llm = llm or OllamaLLM(model=settings.answer_model or None)
 
-    def update(self, ctx: ConversationContext, res: "AgentResult", trace: Trace) -> ConversationContext:
+    def update(self, ctx: ConversationContext, res: "AgentResult", trace: Trace,
+               llm: Any | None = None) -> ConversationContext:
         turn = turn_text(res)
         with trace.step("Update conversation context",
                         "Fold this turn into the conversation memory (entities, filters, preferences, facts) "
                         "so later questions can refer back to it.") as s:
             new = None
-            llm = light_llm(self.llm)      # folding a turn into the memory is form-filling, not reasoning
-            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not self.llm else "on")
+            base = llm or self.llm
+            llm = light_llm(base)      # folding a turn into the memory is form-filling, not reasoning
+            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not base else "on")
             try:
                 out = llm.chat_json(prompt("memory.system", prompts.CONTEXT_SYSTEM),
                                     prompts.context_user(json.dumps(ctx.to_dict(), ensure_ascii=False), turn),

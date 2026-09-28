@@ -67,8 +67,11 @@ class RequestStandardizer:
     def __init__(self, llm: Any | None = None):
         self.llm = llm or OllamaLLM()
 
-    def standardize(self, question: str, ctx: ConversationContext, previous: str, trace: Trace) -> StandardRequest:
-        """previous = the last turn's question / SQL / first rows (concrete values to copy from)."""
+    def standardize(self, question: str, ctx: ConversationContext, previous: str, trace: Trace,
+                    llm: Any | None = None) -> StandardRequest:
+        """previous = the last turn's question / SQL / first rows (concrete values to copy from).
+        llm: the model this call goes to (a flow step's assigned agent); default the standardiser's own."""
+        llm = llm or self.llm
         q = " ".join(question.split())
         req = StandardRequest(question=q, standalone_question=q)
         memory = ctx.as_text()
@@ -77,9 +80,9 @@ class RequestStandardizer:
                         "turns, fix wording, and pull out filters, measures, grouping, sort and limit.") as s:
             s.add(context_given_to_model=memory or "(empty - first question of the conversation)")
             try:
-                out = self.llm.chat_json(prompt("understanding.system", prompts.REQUEST_SYSTEM), prompts.request_user(memory, previous, q),
+                out = llm.chat_json(prompt("understanding.system", prompts.REQUEST_SYSTEM), prompts.request_user(memory, previous, q),
                                          prompts.REQUEST_SCHEMA)
-                s.add_thinking(self.llm)
+                s.add_thinking(llm)
             except Exception as exc:
                 s.status = "warning"
                 s.add(note=f"Standardiser failed ({exc}); the message is used as typed.")

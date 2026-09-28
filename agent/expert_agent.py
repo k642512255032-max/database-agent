@@ -327,9 +327,11 @@ class ExpertAgent:
                 + prompt(f"expert.focus.{t}", TASK_FOCUS[t]) + "\n\n" + prompt("expert.review_format", REVIEW_FORMAT))
 
     # ------------------------------------------------------------ plan (before SQL)
-    def plan(self, res: "AgentResult", trace: Trace, schema_text: str, schema: dict, ml_note: str = "") -> DataPlan | None:
+    def plan(self, res: "AgentResult", trace: Trace, schema_text: str, schema: dict, ml_note: str = "",
+             llm: Any | None = None) -> DataPlan | None:
         """Decide which tables / columns / filters answer the request and write the order for the SQL writer.
         Returns None (warning step) when the model fails or names no valid table."""
+        llm = llm or self.llm
         with trace.step("Expert data plan (expert agent)",
                         "The briefed expert decides which tables, columns and filters answer the request and "
                         "writes the order the SQL writer must follow.") as s:
@@ -337,11 +339,11 @@ class ExpertAgent:
             details = req.details_text() if req is not None else ""
             material = plan_material(res.standalone_question or res.question, details, res.intent, schema_text,
                                      self.briefing, ml_note)
-            s.add(model=getattr(self.llm, "model", "?"), persona=self.persona,
+            s.add(model=getattr(llm, "model", "?"), persona=self.persona,
                   briefing_given_to_model=self.briefing or "(none)", schema_given_to_model=schema_text)
             try:
-                out = self.llm.chat_json(prompt("expert.plan", PLAN_SYSTEM, persona=self.persona), material, PLAN_SCHEMA)
-                s.add_thinking(self.llm)
+                out = llm.chat_json(prompt("expert.plan", PLAN_SYSTEM, persona=self.persona), material, PLAN_SCHEMA)
+                s.add_thinking(llm)
                 s.reasoning = out.get("reasoning")
                 plan, notes = validate_plan(out, schema)
                 if notes:
@@ -358,21 +360,22 @@ class ExpertAgent:
                 return None
 
     # ------------------------------------------------------------ assess (after the data)
-    def assess(self, res: "AgentResult", trace: Trace) -> dict | None:
+    def assess(self, res: "AgentResult", trace: Trace, llm: Any | None = None) -> dict | None:
         """Expert assessment of the data before the answer is written: {task, verdict, quality_score, expert_answer,
         data_issues, insights, advice, confidence, model, persona} or None when the model failed (warning step)."""
         task = task_for(res)
+        llm = llm or self.llm
         with trace.step("Expert assessment (expert agent)",
                         f"The briefed expert judges the {task.replace('_', ' ')} result - data quality, its own "
                         "answer, insights and advice - which the answer agent then builds on.") as s:
             material = review_material(res, task)
-            s.add(model=getattr(self.llm, "model", "?"), task=task, persona=self.persona,
+            s.add(model=getattr(llm, "model", "?"), task=task, persona=self.persona,
                   quality_report_given_to_model=material)
             try:
-                out = _clean_review(self.llm.chat_json(self.system_prompt(task), material, REVIEW_SCHEMA))
-                s.add_thinking(self.llm)
+                out = _clean_review(llm.chat_json(self.system_prompt(task), material, REVIEW_SCHEMA))
+                s.add_thinking(llm)
                 s.add(verdict=out["verdict"], quality_score=out["quality_score"], expert_answer=out["expert_answer"])
-                return {**out, "task": task, "model": getattr(self.llm, "model", "?"), "persona": self.persona}
+                return {**out, "task": task, "model": getattr(llm, "model", "?"), "persona": self.persona}
             except Exception as exc:
                 s.status = "warning"
                 s.add(note=f"Expert agent failed ({exc}); the answer is written from the facts alone.")

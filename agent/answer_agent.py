@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from . import prompts
 from .config import settings
 from .llm import OllamaLLM, light_llm
 from .prompt_store import prompt
@@ -136,8 +137,10 @@ class AnswerAgent:
         self.llm = llm or OllamaLLM(model=settings.answer_model or settings.model)
 
     # =============================================================== answer
-    def compose(self, res: "AgentResult", trace: Trace, brief: bool = False) -> str:
-        """Full analyst answer, or with brief=True a short plain-English summary of a data query."""
+    def compose(self, res: "AgentResult", trace: Trace, brief: bool = False, llm: Any | None = None) -> str:
+        """Full analyst answer, or with brief=True a short plain-English summary of a data query.
+        llm: the model this call goes to (a flow step's assigned agent); default the answer agent's own."""
+        base = llm or self.llm
         system, schema = ((prompt("answer.summary", DATA_SUMMARY_SYSTEM), DATA_SUMMARY_SCHEMA) if brief
                           else (prompt("answer.full", ANSWER_SYSTEM), ANSWER_SCHEMA))
         with trace.step("Summarise the result (answer agent)" if brief else "Compose the answer (answer agent)",
@@ -146,8 +149,8 @@ class AnswerAgent:
                         "key findings, interpretation and caveats.") as s:
             facts = fact_sheet(res)
             # a brief summary only restates the table: no need for the model to reason first
-            llm = light_llm(self.llm) if brief else self.llm
-            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not self.llm else "on",
+            llm = light_llm(base) if brief else base
+            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not base else "on",
                   facts_given_to_model=facts)
             try:
                 out = llm.chat_json(system, f"Question: {res.standalone_question}\n\nFACT SHEET:\n{facts}", schema)
@@ -162,7 +165,8 @@ class AnswerAgent:
                 return facts
 
     # =============================================================== charts
-    def plan_charts(self, res: "AgentResult", trace: Trace, df: pd.DataFrame | None) -> list[dict]:
+    def plan_charts(self, res: "AgentResult", trace: Trace, df: pd.DataFrame | None,
+                    llm: Any | None = None) -> list[dict]:
         if df is None or df.empty or len(df) < 2:
             return []
         prof = profile(df)
@@ -171,8 +175,9 @@ class AnswerAgent:
         with trace.step("Plan charts (answer agent)",
                         "Choose chart type and columns that visualise the finding; the choice is validated "
                         "against the real columns before drawing.") as s:
-            llm = light_llm(self.llm)      # picking columns for a chart is form-filling, not reasoning
-            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not self.llm else "on",
+            base = llm or self.llm
+            llm = light_llm(base)      # picking columns for a chart is form-filling, not reasoning
+            s.add(model=getattr(llm, "model", "?"), thinking="off" if llm is not base else "on",
                   column_profile=profile_text(prof))
             specs: list[dict] = []
             try:
@@ -207,6 +212,8 @@ def fact_sheet(res: "AgentResult", max_rows: int = 10) -> str:
     parts = [f"Analysis type: {res.intent.replace('_', ' ')}."]
     if res.expert:
         parts.append(expert_assessment_text(res.expert))
+    if res.extras.get("notes"):                     # written by custom agents earlier in the flow
+        parts.append(prompts.notes_extra(res.extras["notes"]))
     if df is not None:
         parts.append(f"Rows returned: {len(df)}. Columns: {', '.join(map(str, df.columns))}.")
         prof = profile(df)

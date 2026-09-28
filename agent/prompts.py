@@ -148,6 +148,14 @@ def expert_order_extra(order: str, pitfalls: list[str], tables: list[str], one_r
     return "\n".join(lines) + "\n"
 
 
+def notes_extra(notes: list[tuple[str, str]]) -> str:
+    """Notes written by custom agents earlier in the flow (agent name, text), for the SQL writer and the answer."""
+    notes = [(a, t) for a, t in notes if t]
+    if not notes:
+        return ""
+    return "NOTES FROM OTHER AGENTS (follow them when they apply):\n" + "\n".join(f"- {a}: {t}" for a, t in notes)
+
+
 def context_extra(memory: str, request_details: str) -> str:
     """Block for the SQL prompt: conversation memory + what the standardiser extracted."""
     parts = []

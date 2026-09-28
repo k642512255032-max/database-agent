@@ -148,7 +148,9 @@ class KnowledgeBase:
 
     def _dir(self, agent: str) -> Path:
         if agent not in AGENTS:
-            raise KeyError(f"unknown agent '{agent}'")
+            from . import custom_agents              # local: custom_agents imports AGENTS from this module
+            if not custom_agents.agent_store.exists(agent):
+                raise KeyError(f"unknown agent '{agent}'")
         return self.root / agent
 
     # ---------------------------------------------------------- documents
@@ -366,7 +368,8 @@ class KnowledgeLLM:
         finally:     # label the recorded call (agent.trace) with the agent and where its model came from
             call = getattr(target, "last_request", None)
             if isinstance(call, dict) and call:
-                call.update(agent=AGENTS[self.agent][0], model_source=("Agent settings override"
+                from .custom_agents import agent_label          # local: avoids a circular import
+                call.update(agent=agent_label(self.agent), model_source=("Agent settings override"
                             if self.kb.model_for(self.agent) else "chat sidebar / .env"),
                             knowledge_passages=len(self.last_knowledge))
 

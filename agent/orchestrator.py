@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -32,17 +33,22 @@ from ml.inference import InferenceResult, check_columns, run_inference
 from ml.registry import ModelRegistry
 
 from . import prompts, stats_tools
-from .answer_agent import AnswerAgent
+from . import custom_agents
+from .answer_agent import AnswerAgent, _table_text, expert_assessment_text
 from .config import settings
 from .context import ContextBuilder, ConversationContext
 from .briefing import Briefing, load_briefing
 from .db import Database, UnsafeSQLError
+from .custom_agents import CUSTOM_INPUTS, CUSTOM_OUTPUTS, CUSTOM_SCHEMA, InstructedLLM, custom_system
 from .expert_agent import DataPlan, ExpertAgent
+from .flows import STANDARD, STEP_KINDS, Flow, FlowError, FlowStep, missing_text
 from .knowledge import KnowledgeBase, KnowledgeLLM
 from .llm import OllamaLLM
 from .prompt_store import prompt
 from .request_agent import RequestStandardizer, StandardRequest, previous_turn_text
 from .trace import Step, Trace
+
+log = logging.getLogger(__name__)
 
 ML_WORDS = r"predict|forecast|classif|cluster|segment|group similar|anomal|outlier|unusual|suspicious|fraud|pca|principal component|churn risk|likely to"
 STATS_WORDS = r"correlat|significan|t-test|ttest|anova|chi|regression|relationship|distribution|normal|variance|hypothesis|statistic|describe"
@@ -67,6 +73,8 @@ class AgentResult:
     charts: list[dict] = field(default_factory=list)   # chart specs planned by the answer agent
     expert: Optional[dict] = None               # expert assessment (task, verdict, expert_answer, issues, insights, advice)
     plan: Optional[DataPlan] = None             # the expert's data order for the SQL writer
+    tables: list[str] = field(default_factory=list)   # tables selected for the SQL writer's prompt
+    flow: str = "Standard"                      # name of the flow this turn ran (agent/flows.py)
     error: Optional[str] = None
     extras: dict = field(default_factory=dict)
     _context_future: Any = field(default=None, repr=False, compare=False)   # deferred memory update, if running
@@ -126,6 +134,11 @@ class DataAgent:
         self._router_llm = KnowledgeLLM(self.llm, self.knowledge, "router")
         self._sql_llm = KnowledgeLLM(self.llm, self.knowledge, "sql")
         self.wrap_agents()
+        # custom flows (agent/flows.py): a custom agent's model is built with llm_factory (tests replace it);
+        # agents = None reads the saved custom agents (custom_agents.agent_store), tests set their own store
+        self.llm_factory: Callable[[str], Any] = lambda model: OllamaLLM(model=model)
+        self.agents: Any = None
+        self._custom_llms: dict[tuple, Any] = {}
 
     def wrap_agents(self) -> None:
         """Give each sub-agent its knowledge / model override (Fine-tune agents and Agent settings pages).
@@ -151,12 +164,17 @@ class DataAgent:
     def ask(self, question: str, on_step: Callable[[Step], None] | None = None,
             force_intent: str | None = None, force_model: str | None = None,
             history: list["AgentResult"] | None = None, context: ConversationContext | None = None,
-            build_context: bool = True) -> AgentResult:
+            build_context: bool = True, flow: Flow | None = None) -> AgentResult:
         """history = previous AgentResults of this chat (oldest first). The conversation memory is taken
-        from `context`, else from the last history entry; build_context=False skips updating it."""
+        from `context`, else from the last history entry; build_context=False skips updating it.
+        flow = the steps to run (agent/flows.py); default the Standard flow. Passed per call, never stored: one
+        DataAgent is shared by every chat session (ui_shared.get_agent)."""
+        flow = flow or STANDARD
         trace = Trace(question, on_step=on_step)
         res = AgentResult(question, trace)
         res.standalone_question = question
+        res.flow = flow.name
+        res.extras["flow"] = [(st.kind, st.agent) for st in flow.steps]
         history = history or []
         for h in history:            # a deferred memory update of an earlier turn must be in before we read it
             h.wait_context()
@@ -166,33 +184,164 @@ class DataAgent:
         self._conversation_tables_hint = ""
         if self.expert and not self.expert_agent.briefing:
             self.expert_agent.briefing = self.briefing.text
+        # decided up front, not when the loop reaches it: a turn that fails is still folded into the memory
+        memory_step = next((st for st in flow.steps if st.kind == "memory"), None)
         try:
-            self._standardise(res, ctx, history)
-            self._route(res, force_intent, force_model)
-            self._plan(res)
-            tables = self._link_tables(res)
-            self._generate_and_run_sql(res, tables)
-            if res.intent == "statistics":
-                self._statistics(res)
-            elif res.intent == "machine_learning":
-                self._machine_learning(res)
-            self._expert(res)
-            self._answer(res)
+            if not flow.steps:
+                raise FlowError("The flow has no steps. Add steps on the Flows page or pick another flow.")
+            if not any(st.kind == "standardise" for st in flow.steps):
+                self._standardise(res, ctx, history, enabled=False)   # message as typed: later steps need a request
+            produced = {"question"}
+            all_provides = set().union(*(st.provides() for st in flow.steps))
+            for step in flow.steps:
+                kind = STEP_KINDS.get(step.kind)
+                if kind is None:
+                    continue
+                missing = step.needs() - produced
+                if missing:
+                    raise FlowError(missing_text(step, missing, in_flow=missing <= all_provides)
+                                    + " (Flows page)")
+                if step.kind == "memory":
+                    pass                          # runs after the answer (deferred), wherever it is in the list
+                elif self._switched_on(kind):
+                    self._run_step(step, res, ctx, history, force_intent, force_model)
+                elif step.kind == "standardise":  # switched off in the sidebar: the message is used as typed
+                    self._standardise(res, ctx, history, enabled=False)
+                produced |= step.provides()
         except Exception as exc:
             res.error = f"{type(exc).__name__}: {exc}"
             res.answer = f"I could not complete this request: {exc}"
-        if build_context and settings.defer_memory_update:
-            # the answer goes to the user now; the next ask() waits for this future through wait_context()
-            res._context_future = self._executor.submit(self._update_context, ctx, res, trace)
-        elif build_context:
-            res.context = self._update_context(ctx, res, trace)
+        if build_context and memory_step is not None:
+            try:                                 # resolved here: the deferred update runs in another thread
+                llm = self._llm_for(memory_step)
+            except Exception as exc:             # e.g. an unreadable custom agents file: use the memory agent
+                log.warning("memory step agent unavailable, using the default: %s", exc)
+                llm = self.context_builder.llm
+            if settings.defer_memory_update:
+                # the answer goes to the user now; the next ask() waits for this future through wait_context()
+                res._context_future = self._executor.submit(self._update_context, ctx, res, trace, llm)
+            else:
+                res.context = self._update_context(ctx, res, trace, llm)
         else:
             res.context = ctx
         return res
 
-    def _update_context(self, ctx: ConversationContext, res: AgentResult, trace: Trace) -> ConversationContext:
+    # ============================================================ flow engine
+    def _switched_on(self, kind) -> bool:
+        """The chat sidebar's switches still apply inside any flow."""
+        return {"standardise": self.standardise, "expert_plan": self.expert_plan,
+                "expert_assess": self.expert_assess, "charts": self.charts}.get(kind.switch, True)
+
+    def _agent_store(self):
+        return self.agents if self.agents is not None else custom_agents.agent_store
+
+    def _llm_for(self, step: FlowStep) -> Any:
+        """The LLM a step's calls go to: its assigned agent (built-in or custom), else the kind's default agent.
+        None for steps without a model (table linking)."""
+        kind = STEP_KINDS[step.kind]
+        builtin = self.agent_llms()
+        key = step.agent or kind.agent
+        if key in builtin:
+            return builtin[key]
+        agent = self._agent_store().get(key) if key else None
+        if agent is None:                        # deleted agent: the kind's default agent (the editor warns)
+            return builtin.get(kind.agent)
+        model = agent.model or getattr(self.answer_agent.llm, "model", None) or settings.model
+        wrap = step.kind != "custom"             # a custom step's system prompt already is the agent's instructions
+        cache_key = (agent.id, model, wrap, agent.name, agent.instructions)
+        cached = self._custom_llms.get(cache_key)
+        if cached is None:
+            llm = KnowledgeLLM(self.llm_factory(model), self.knowledge, agent.id)
+            cached = InstructedLLM(llm, agent.name, agent.instructions) if wrap else llm
+            self._custom_llms[cache_key] = cached
+        return cached
+
+    def custom_llms(self, flow: Flow) -> dict[str, Any]:
+        """Custom agent name -> the LLM its steps in `flow` call (chat sidebar: models list, health, warm-up)."""
+        out = {}
+        for step in flow.steps:
+            agent = self._agent_store().get(step.agent) if step.agent else None
+            if agent is not None and agent.name not in out:
+                out[agent.name] = self._llm_for(step)
+        return out
+
+    def _run_step(self, step: FlowStep, res: AgentResult, ctx: ConversationContext, history: list["AgentResult"],
+                  force_intent: str | None, force_model: str | None) -> None:
+        llm = self._llm_for(step)
+        kind = step.kind
+        if kind == "standardise":
+            self._standardise(res, ctx, history, llm=llm)
+        elif kind == "route":
+            self._route(res, force_intent, force_model, llm=llm)
+        elif kind == "expert_plan":
+            self._plan(res, llm=llm)
+        elif kind == "link_tables":
+            res.tables = self._link_tables(res)
+        elif kind == "sql":
+            self._generate_and_run_sql(res, res.tables, llm=llm)
+        elif kind == "analysis":
+            if res.intent == "statistics":
+                self._statistics(res, llm=llm)
+            elif res.intent == "machine_learning":
+                self._machine_learning(res)
+        elif kind == "expert_assess":
+            self._expert(res, llm=llm)
+        elif kind == "answer":
+            self._answer(res, llm=llm)
+        elif kind == "charts":
+            res.charts = self.answer_agent.plan_charts(res, res.trace, res.frame(), llm=llm)
+        elif kind == "custom":
+            self._custom(step, res, llm)
+
+    def _custom(self, step: FlowStep, res: AgentResult, llm: Any) -> None:
+        """A custom agent's own step: reads one part of the turn, writes a note / a rewritten question / an answer
+        section. A failure is a warning: a custom step never stops the turn."""
+        agent = self._agent_store().get(step.agent) if step.agent else None
+        if agent is None:
+            with res.trace.step("Custom step skipped", "The agent of this step no longer exists.") as s:
+                s.status = "warning"
+                s.add(note=f"Agent '{step.agent or '(none)'}' not found; choose one on the Flows page.")
+            return
+        with res.trace.step(f"{agent.name} (custom agent)", agent.instructions.strip().split("\n", 1)[0][:160]) as s:
+            material = self._custom_input(step.input, res)
+            s.add(model=getattr(llm, "model", "?"), reads=CUSTOM_INPUTS.get(step.input, step.input),
+                  writes=CUSTOM_OUTPUTS.get(step.output, step.output), material_given_to_model=material)
+            try:
+                out = llm.chat_json(custom_system(agent, step.output), material, CUSTOM_SCHEMA)
+                s.add_thinking(llm)
+            except Exception as exc:
+                s.status = "warning"
+                s.add(note=f"{agent.name} failed ({exc}); step skipped.")
+                return
+            s.reasoning = out.get("reasoning")
+            text = str(out.get("text") or "").strip()
+            if step.output == "note":
+                res.extras.setdefault("notes", []).append((agent.name, text))
+            elif step.output == "question" and text:
+                res.standalone_question = text
+            elif step.output == "answer_section" and text:
+                res.answer = f"{res.answer}\n\n#### {agent.name}\n{text}"
+            s.add(result=text or "(empty)")
+
+    @staticmethod
+    def _custom_input(what: str, res: AgentResult) -> str:
+        if what == "request" and res.request is not None:
+            return json.dumps(res.request.to_dict(), ensure_ascii=False, indent=1)
+        if what == "sql":
+            return res.sql or "(no SQL)"
+        if what == "table":
+            df = res.frame()
+            return f"{len(df)} rows. First rows:\n{_table_text(df, 20)}" if df is not None else "(no result table)"
+        if what == "expert":
+            return expert_assessment_text(res.expert) if res.expert else "(no expert assessment)"
+        if what == "answer":
+            return res.answer or "(no answer)"
+        return f"Question: {res.standalone_question or res.question}"
+
+    def _update_context(self, ctx: ConversationContext, res: AgentResult, trace: Trace,
+                        llm: Any | None = None) -> ConversationContext:
         try:
-            return self.context_builder.update(ctx, res, trace)
+            return self.context_builder.update(ctx, res, trace, llm=llm)
         except Exception:   # the answer is already there; never lose it over the memory update
             return ctx
 
@@ -208,12 +357,13 @@ class DataAgent:
     def expert(self, value: bool) -> None:
         self.expert_plan = self.expert_assess = bool(value)
 
-    def _standardise(self, res: AgentResult, ctx: ConversationContext, history: list[AgentResult]) -> None:
+    def _standardise(self, res: AgentResult, ctx: ConversationContext, history: list[AgentResult],
+                     llm: Any | None = None, enabled: bool = True) -> None:
         last = next((h for h in reversed(history) if h.sql or h.answer), None)
         previous = previous_turn_text(last.standalone_question or last.question, last.sql, last.frame(),
                                       last.answer) if last else ""
-        if self.standardise:
-            req = self.standardizer.standardize(res.question, ctx, previous, res.trace)
+        if enabled:
+            req = self.standardizer.standardize(res.question, ctx, previous, res.trace, llm=llm)
         else:   # agent switched off: the message is used as typed (no LLM call, no trace step)
             q = " ".join(res.question.split())
             req = StandardRequest(question=q, standalone_question=q)
@@ -243,7 +393,9 @@ class DataAgent:
         return self._briefing
 
     # ============================================================ 1. router
-    def _route(self, res: AgentResult, force_intent: str | None, force_model: str | None) -> None:
+    def _route(self, res: AgentResult, force_intent: str | None, force_model: str | None,
+               llm: Any | None = None) -> None:
+        router_llm = llm or self._router_llm
         with res.trace.step("Understand the request",
                             "Decide whether this needs plain SQL, a statistical test, or a trained ML model.") as s:
             cards = {c["name"]: c for c in self.registry.cards()}
@@ -261,10 +413,10 @@ class DataAgent:
                 s.add(router="skipped")
             else:
                 try:
-                    out = self._router_llm.chat_json(prompt("router.system", prompts.ROUTER_SYSTEM),
-                                             prompts.router_user(res.standalone_question, self.registry.manifest_text()),
-                                             prompts.ROUTER_SCHEMA)
-                    s.add_thinking(self._router_llm)
+                    out = router_llm.chat_json(prompt("router.system", prompts.ROUTER_SYSTEM),
+                                               prompts.router_user(res.standalone_question, self.registry.manifest_text()),
+                                               prompts.ROUTER_SCHEMA)
+                    s.add_thinking(router_llm)
                     intent, model, reasoning = out.get("intent"), out.get("model_name", ""), out.get("reasoning")
                 except Exception as exc:
                     intent, model, reasoning = None, "", f"LLM router failed ({exc}); used keyword rules."
@@ -311,10 +463,8 @@ class DataAgent:
         return best
 
     # ============================================== 2. expert data plan
-    def _plan(self, res: AgentResult) -> None:
-        """The briefed expert decides what data is needed; no-op when the plan step is off."""
-        if not self.expert_plan:
-            return
+    def _plan(self, res: AgentResult, llm: Any | None = None) -> None:
+        """The briefed expert decides what data is needed (the flow skips it when the sidebar switch is off)."""
         schema = self.db.schema()
         if len(schema) <= settings.max_tables_in_prompt * 2:
             candidates = list(schema)
@@ -328,7 +478,7 @@ class DataAgent:
             cols = ([card["id_column"]] if card.get("id_column") else []) + card["feature_columns"]
             ml_note = (f"The rows feed the trained model '{card['name']}'; the result must contain exactly these "
                        f"columns: {', '.join(cols)}. Base tables of the model: {', '.join(self._model_tables(res))}.")
-        res.plan = self.expert_agent.plan(res, res.trace, schema_text, schema, ml_note)
+        res.plan = self.expert_agent.plan(res, res.trace, schema_text, schema, ml_note, llm=llm)
 
     def _model_tables(self, res: AgentResult) -> list[str]:
         if not res.model_name:
@@ -354,7 +504,8 @@ class DataAgent:
             return tables
 
     # ================================================= 3-5. SQL gen / run
-    def _generate_and_run_sql(self, res: AgentResult, tables: list[str]) -> None:
+    def _generate_and_run_sql(self, res: AgentResult, tables: list[str], llm: Any | None = None) -> None:
+        sql_llm = llm or self._sql_llm
         schema_text = self.db.schema_text(tables)
         dialect = "MySQL" if self.db.dialect == "mysql" else self.db.dialect
         extra = ""
@@ -367,13 +518,15 @@ class DataAgent:
         if res.plan is not None:      # the expert's order comes first: it is the spec the code agent implements
             extra = prompts.expert_order_extra(res.plan.order_for_sql, res.plan.pitfalls, res.plan.tables,
                                                res.plan.one_row_per) + "\n" + extra
+        if res.extras.get("notes"):   # custom agents' notes from earlier in the flow
+            extra = prompts.notes_extra(res.extras["notes"]) + "\n" + extra
         if self._conversation:
             extra = self._conversation + "\n" + extra
 
         with res.trace.step("Generate SQL", "Translate the English request into a SQL query using the schema.") as s:
-            out = self._sql_llm.chat_json(prompt("sql.system", prompts.SQL_SYSTEM, dialect=dialect),
+            out = sql_llm.chat_json(prompt("sql.system", prompts.SQL_SYSTEM, dialect=dialect),
                                      prompts.sql_user(res.standalone_question, schema_text, extra), prompts.SQL_SCHEMA)
-            s.add_thinking(self._sql_llm)
+            s.add_thinking(sql_llm)
             sql = _clean_sql(out.get("sql", ""))
             s.reasoning = out.get("reasoning")
             s.add(sql=sql, schema_given_to_model=schema_text)
@@ -383,10 +536,10 @@ class DataAgent:
             if last_error is not None:
                 with res.trace.step(f"Repair SQL (attempt {attempt - 1})",
                                     "The previous query failed; the error message is sent back to the model to fix it.") as s:
-                    out = self._sql_llm.chat_json(prompt("sql.fix", prompts.FIX_SYSTEM, dialect=dialect),
+                    out = sql_llm.chat_json(prompt("sql.fix", prompts.FIX_SYSTEM, dialect=dialect),
                                              prompts.fix_user(res.standalone_question, schema_text, sql, last_error, extra),
                                              prompts.SQL_SCHEMA)
-                    s.add_thinking(self._sql_llm)
+                    s.add_thinking(sql_llm)
                     sql = _clean_sql(out.get("sql", ""))
                     s.reasoning = out.get("reasoning")
                     s.add(previous_error=last_error, sql=sql)
@@ -423,16 +576,17 @@ class DataAgent:
         raise RuntimeError(f"SQL failed after {settings.max_sql_retries} repairs: {last_error}")
 
     # ========================================================= 6a. statistics
-    def _statistics(self, res: AgentResult) -> None:
+    def _statistics(self, res: AgentResult, llm: Any | None = None) -> None:
+        router_llm = llm or self._router_llm
         df = stats_tools.numericize(res.data)
         with res.trace.step("Choose statistical method",
                             "Pick the test that matches the question and the column types in the result.") as s:
             profile = "\n".join(f"- {c}: {df[c].dtype}, {df[c].nunique()} distinct" for c in df.columns)
             try:
                 # part of the Router agent: its knowledge and model override apply (Agent settings page)
-                out = self._router_llm.chat_json(prompt("router.stats", prompts.STATS_SYSTEM),
-                                                 prompts.stats_user(res.standalone_question, profile), prompts.STATS_SCHEMA)
-                s.add_thinking(self._router_llm)
+                out = router_llm.chat_json(prompt("router.stats", prompts.STATS_SYSTEM),
+                                           prompts.stats_user(res.standalone_question, profile), prompts.STATS_SCHEMA)
+                s.add_thinking(router_llm)
             except Exception as exc:
                 out = {"method": "describe", "target": "", "group": "", "columns": [],
                        "reasoning": f"LLM failed ({exc}); defaulting to descriptive statistics."}
@@ -482,28 +636,27 @@ class DataAgent:
             s.add(explanations=[sec["title"] for sec in ml.sections])
 
     # ============================================================= 7. answer
-    def _answer(self, res: AgentResult) -> None:
+    def _answer(self, res: AgentResult, llm: Any | None = None) -> None:
         if res.intent == "data_query":
             n = len(res.data) if res.data is not None else 0
             if self.summarise_data and n > 0:
                 # the SQL and table are still shown; the answer model adds a short plain-English summary on top
-                res.answer = self.answer_agent.compose(res, res.trace, brief=True)
+                res.answer = self.answer_agent.compose(res, res.trace, brief=True, llm=llm)
                 res.extras["summarised"] = True
             else:
                 with res.trace.step("Write the answer", "Return the SQL and the result table directly.") as s:
                     res.answer = f"{n:,} row{'s' if n != 1 else ''} returned."
                     s.add(decision="Data query - the SQL and its result table are shown as-is, without an LLM summary.")
         else:
-            res.answer = self.answer_agent.compose(res, res.trace)
-        if self.charts:
-            res.charts = self.answer_agent.plan_charts(res, res.trace, res.frame())
+            res.answer = self.answer_agent.compose(res, res.trace, llm=llm)
+
 
 
     # ================================================== 7. expert assessment
-    def _expert(self, res: AgentResult) -> None:
+    def _expert(self, res: AgentResult, llm: Any | None = None) -> None:
         """Runs before the answer agent: its output is part of the fact sheet the answer is written from."""
         if self.expert_assess and res.data is not None:
-            res.expert = self.expert_agent.assess(res, res.trace)
+            res.expert = self.expert_agent.assess(res, res.trace, llm=llm)
 
 
 # ---------------------------------------------------------------- helpers
