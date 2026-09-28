@@ -32,6 +32,22 @@ def sh(cmd: str) -> str:
     return r.stdout
 
 
+def free_gpu() -> None:
+    """Unload the app's Ollama models: on the Colab host they hold most of the T4's memory and training would run out.
+    The app loads them again on its next question (slower first answer, then normal)."""
+    import urllib.request
+    host = "http://127.0.0.1:11434"
+    try:
+        loaded = [m["name"] for m in json.load(urllib.request.urlopen(f"{host}/api/ps", timeout=5)).get("models", [])]
+    except Exception:
+        return                                           # Ollama not running here: nothing to free
+    for name in loaded:
+        req = urllib.request.Request(f"{host}/api/generate", data=json.dumps({"model": name, "keep_alive": 0}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=60).read()
+        print(f"OK   unloaded {name} from the GPU for training")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="chat JSONL exported from the Fine-tune agents page")
@@ -53,6 +69,7 @@ def main() -> None:
     if len(rows) < 20:
         print("WARN fewer than 20 examples: the adapter will barely change the model")
 
+    free_gpu()
     print("...  installing Unsloth (2-4 min)")
     sh(f"{sys.executable} -m pip install -q unsloth")
     from unsloth import FastLanguageModel   # import first: Unsloth patches transformers / trl

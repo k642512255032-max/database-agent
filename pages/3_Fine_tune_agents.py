@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from agent.agent_catalog import default_model
-from agent.config import settings
+from agent.config import ROOT, settings
 from agent.knowledge import AGENTS, UPLOAD_TYPES, KnowledgeBase
 from agent.llm import OllamaLLM
 
@@ -177,10 +177,15 @@ with st.container(border=True):
         if status["dataset"] < 200:
             st.caption(f"{status['dataset']} examples is a small dataset; a few hundred give a steadier result. "
                        "Hand-written .jsonl examples are worth more than generated ones.")
-    base = default_model(agent)
-    st.markdown("**b.** On the Colab host (T4 GPU), upload the dataset and run:")
-    st.code(f"!python deploy/colab/finetune_agent.py --data {agent}_train.jsonl --base {base} --name {agent}-ft",
-            language="bash")
+    # the model the agent runs on without a fine-tuned one: the chat sidebar's choice this session, else .env
+    base = (st.session_state.get("chat_models") or {}).get(agent) or default_model(agent)
+    st.markdown("**b.** Train on a GPU. When this app runs on the Colab host, the dataset is already on that machine: "
+                "run this in a new notebook cell (about 15–30 min on a T4). It frees the GPU first, so answers are "
+                "slower until training ends.")
+    st.code(f"!python \"{ROOT / 'deploy' / 'colab' / 'finetune_agent.py'}\" --data \"{kb.dataset_path(agent)}\" "
+            f"--base {base} --name {agent}-ft", language="bash")
+    st.caption("Running the app on your own PC instead? Download the dataset above, upload it to a Colab notebook "
+               "with a T4 GPU, and pass its file name to --data.")
     st.markdown("**c.** Model for this agent (empty = the default model):")
     m1, m2 = st.columns([3, 1])
     new_model = m1.text_input("Fine-tuned model", status["model"], key=f"model_{agent}", label_visibility="collapsed",
